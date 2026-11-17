@@ -411,7 +411,34 @@ void UpdateWidget() {
     widget::SetItems(items);
 }
 
+// Last percentage read while NOT charging, per device name (the name, not the key: a device moved
+// from its receiver to a cable gets a new key). Some devices restart their charge estimate when a
+// cable goes in -- a Logitech G502 X reports ~50% at first and only reaches its real 70-something
+// after a while -- but a battery does not drop while charging, so until the reading catches up the
+// last value from before charging is shown.
+struct IdleReading { int pct; ULONGLONG at; };
+std::map<std::wstring, IdleReading> g_idlePct;
+constexpr ULONGLONG kIdlePctMaxAgeMs = 12ull * 60 * 60 * 1000;
+
+void SmoothCharging(DeviceStatus& s) {
+    if (s.percent < 0 || s.name.empty() || s.name.find(L"wireless device") != std::wstring::npos) return;
+    ULONGLONG now = GetTickCount64();
+    if (!s.charging) {
+        g_idlePct[s.name] = { s.percent, now };
+        return;
+    }
+    auto it = g_idlePct.find(s.name);
+    if (it == g_idlePct.end() || now - it->second.at > kIdlePctMaxAgeMs) return;
+    if (s.percent < it->second.pct) {
+        s.percent = it->second.pct;
+        s.levelText.clear();
+    } else {
+        g_idlePct.erase(it);  // caught up: the device's own reading is trusted again
+    }
+}
+
 void OnResults(std::vector<DeviceStatus>& results) {
+    for (auto& s : results) SmoothCharging(s);
     std::map<std::wstring, bool> seen;
     for (auto& s : results) {
         auto& e = g_entries[s.key];
