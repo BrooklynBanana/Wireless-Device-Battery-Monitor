@@ -28,6 +28,7 @@ constexpr UINT PLACEHOLDER_ID = 1;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY,
+    ID_MODE_MYFINDER,
     ID_DEVICE_FIRST = 1000
 };
 
@@ -43,6 +44,7 @@ HANDLE g_refreshEvt, g_stopEvt, g_worker;
 UINT g_taskbarCreatedMsg;
 bool g_lightTaskbar;
 bool g_wantWidget = true;      // user's choice: taskbar widget (default) or tray icons
+bool g_myFinder = false;
 bool g_useWidget = false;      // what is actually shown right now
 bool g_hideLastKnown = false;  // hide (last known) / asleep devices from taskbar and tray
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
@@ -439,7 +441,8 @@ void OnResults(std::vector<DeviceStatus>& results) {
 // widget cannot be created (e.g. Explorer not ready yet). Called once a second.
 void Reconcile() {
     bool alive = g_wantWidget && widget::Alive();
-    if (g_wantWidget && !alive) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
+    if (alive) alive = widget::Reposition();
+    if (g_wantWidget && !alive && !widget::Alive()) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
     if (!g_wantWidget) widget::Destroy();
     bool changed = alive != g_useWidget;
     g_useWidget = alive;
@@ -447,8 +450,6 @@ void Reconcile() {
         for (auto& [k, e] : g_entries) ApplyEntry(e);
         UpdatePlaceholder();
         UpdateWidget();
-    } else if (g_useWidget) {
-        widget::Reposition();
     }
 }
 
@@ -501,9 +502,12 @@ void ShowMenu() {
     }
     AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, L"Hide last known / asleep devices");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, L"Show on the taskbar (icon + percentage)");
+    AppendMenuW(m, MF_STRING | (g_wantWidget && !g_myFinder ? MF_CHECKED : 0), ID_MODE_WIDGET, L"Show on the taskbar (icon + percentage)");
+    AppendMenuW(m, MF_STRING | (g_wantWidget && g_myFinder ? MF_CHECKED : 0), ID_MODE_MYFINDER,
+                L"Show on MyFinder (experimental; automatic alignment)");
     AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, L"Show as tray icons");
-    CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
+    CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_MYFINDER,
+                       !g_wantWidget ? ID_MODE_TRAY : g_myFinder ? ID_MODE_MYFINDER : ID_MODE_WIDGET, MF_BYCOMMAND);
     UINT bgFlags = MF_STRING | (g_widgetBackground ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED);
     AppendMenuW(m, bgFlags, ID_WIDGET_BACKGROUND, L"Background behind taskbar text (for transparent taskbars)");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -522,7 +526,15 @@ void ShowMenu() {
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
-        case ID_MODE_WIDGET: SetMode(true); break;
+        case ID_MODE_WIDGET:
+        case ID_MODE_MYFINDER:
+            g_myFinder = cmd == ID_MODE_MYFINDER;
+            SaveBoolSetting(L"MyFinderWidget", g_myFinder);
+            widget::SetMyFinder(g_myFinder);
+            SetMode(true);
+            // The host changed even if both modes use a widget.
+            UpdateWidget();
+            break;
         case ID_MODE_TRAY: SetMode(false); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
@@ -684,6 +696,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_wantWidget = LoadWidgetMode();
     g_hideLastKnown = LoadHideLastKnown();
+    g_myFinder = LoadBoolSetting(L"MyFinderWidget", false);
+    widget::SetMyFinder(g_myFinder);
     g_widgetBackground = LoadWidgetBackground();
     widget::SetBackground(g_widgetBackground);  // remembered by the widget across re-creation
     LoadHidden();

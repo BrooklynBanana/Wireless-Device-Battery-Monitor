@@ -1,4 +1,5 @@
 #include "widget.h"
+#include "myfinder_layout.h"
 
 #include <commctrl.h>
 #include <uiautomation.h>
@@ -9,6 +10,7 @@ namespace {
 HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
 UINT g_clickMsg;
 bool g_light, g_hover;
+bool g_myFinder = false;
 bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
 std::vector<WidgetItem> g_items;
 std::wstring g_tipText;
@@ -17,6 +19,76 @@ int g_lastW = -1, g_lastDpi = 0, g_lastLeft = -1;
 SIZE g_size{};
 
 const wchar_t* kClass = L"WirelessBatteryWidget";
+
+// Ask MyFinder to render its own bar, excluding our owned popup. No desktop pixels, files or
+// network are involved. Keep the potentially blocking PrintWindow call off our UI thread.
+SRWLOCK g_finderLock = SRWLOCK_INIT;
+HWND g_finderHost = nullptr, g_finderResultHost = nullptr;
+RECT g_finderRect{};
+int g_finderEdge = -1;
+ULONGLONG g_finderUpdated = 0;
+HANDLE g_finderWake = nullptr;
+
+DWORD WINAPI FinderLayoutThread(LPVOID) {
+    for (;;) {
+        WaitForSingleObject(g_finderWake, 1000);
+        AcquireSRWLockShared(&g_finderLock);
+        HWND host = g_finderHost;
+        ReleaseSRWLockShared(&g_finderLock);
+        if (!host || !IsWindow(host) || !IsWindowVisible(host)) continue;
+        RECT rect{};
+        if (!GetWindowRect(host, &rect)) continue;
+        int w = rect.right - rect.left, h = rect.bottom - rect.top;
+        if (w < 8 || w > 16384 || h < 4 || h > 256) continue;
+        int edge = -1;
+        HDC screen = GetDC(nullptr), mem = CreateCompatibleDC(screen);
+        BITMAPINFO info{};
+        info.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
+        void* bits = nullptr;
+        HBITMAP bitmap = mem ? CreateDIBSection(mem, &info, DIB_RGB_COLORS, &bits, nullptr, 0) : nullptr;
+        if (bitmap && bits) {
+            HGDIOBJ old = SelectObject(mem, bitmap);
+            memset(bits, 0, (size_t)w * h * 4);
+            if (PrintWindow(host, mem, 2 /* PW_RENDERFULLCONTENT */)) {
+                GdiFlush();
+                edge = myfinder::GroupLeft(static_cast<const std::uint32_t*>(bits), w, h, std::max(24, h * 2));
+            }
+            SelectObject(mem, old);
+        }
+        if (bitmap) DeleteObject(bitmap);
+        if (mem) DeleteDC(mem);
+        if (screen) ReleaseDC(nullptr, screen);
+        AcquireSRWLockExclusive(&g_finderLock);
+        g_finderResultHost = host;
+        g_finderRect = rect;
+        g_finderEdge = edge;
+        g_finderUpdated = GetTickCount64();
+        ReleaseSRWLockExclusive(&g_finderLock);
+    }
+}
+
+void WatchFinder(HWND host) {
+    AcquireSRWLockExclusive(&g_finderLock);
+    bool changed = host != g_finderHost;
+    g_finderHost = host;
+    ReleaseSRWLockExclusive(&g_finderLock);
+    if (host && !g_finderWake) {
+        g_finderWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        HANDLE thread = g_finderWake ? CreateThread(nullptr, 0, FinderLayoutThread, nullptr, 0, nullptr) : nullptr;
+        if (thread) CloseHandle(thread);
+    }
+    if (changed && g_finderWake) SetEvent(g_finderWake);
+}
+
+int FinderEdge(HWND host, const RECT& rect) {
+    AcquireSRWLockShared(&g_finderLock);
+    int edge = g_finderResultHost == host && EqualRect(&rect, &g_finderRect) &&
+               GetTickCount64() - g_finderUpdated < 3500 ? g_finderEdge : -1;
+    ReleaseSRWLockShared(&g_finderLock);
+    return edge;
+}
+
+
 
 int Dpi() {
     UINT d = g_taskbar ? GetDpiForWindow(g_taskbar) : 0;
@@ -322,16 +394,24 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 
 namespace widget {
 
+void SetMyFinder(bool on) {
+    if (g_myFinder == on) return;
+    Destroy();
+    g_myFinder = on;
+}
+
 bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
     Destroy();
-    g_taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
-    if (!g_taskbar || !FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr)) { g_taskbar = nullptr; return false; }
+    g_taskbar = FindWindowW(g_myFinder ? L"MyFinderApp" : L"Shell_TrayWnd", nullptr);
+    if (!g_taskbar || (!g_myFinder && !FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr))) {
+        g_taskbar = nullptr; return false;
+    }
     RECT tb;
     GetWindowRect(g_taskbar, &tb);
     if (tb.bottom - tb.top > tb.right - tb.left) { g_taskbar = nullptr; return false; }  // vertical taskbar: use tray icons
     // Windows 11's taskbar is a XAML island; on Windows 10 the task buttons live in ReBarWindow32
     // and have to be narrowed so they never slide under the widget.
-    g_rebar = FindWindowExW(g_taskbar, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr)
+    g_rebar = g_myFinder || FindWindowExW(g_taskbar, nullptr, L"Windows.UI.Composition.DesktopWindowContentBridge", nullptr)
                   ? nullptr
                   : FindWindowExW(g_taskbar, nullptr, L"ReBarWindow32", nullptr);
     g_notify = notifyWnd;
@@ -347,7 +427,11 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         wc.lpszClassName = kClass;
         registered = RegisterClassExW(&wc) != 0;
     }
-    g_wnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE, kClass, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1,
+    // MyFinder's compositor does not reliably display layered child surfaces. Use an owned popup
+    // there; Windows keeps it above its owner, without a taskbar entry or activating the app.
+    DWORD exStyle = WS_EX_LAYERED | WS_EX_NOACTIVATE | (g_myFinder ? WS_EX_TOOLWINDOW : 0);
+    DWORD style = g_myFinder ? WS_POPUP : WS_CHILD | WS_CLIPSIBLINGS;
+    g_wnd = CreateWindowExW(exStyle, kClass, L"Wireless Battery", style, 0, 0, 1, 1,
                             g_taskbar, nullptr, inst, nullptr);
     if (!g_wnd) { g_taskbar = nullptr; return false; }
 
@@ -365,13 +449,14 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
         SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
     }
-    WatchWidgetsButton(g_taskbar);
+    if (!g_myFinder || g_wbWake) WatchWidgetsButton(g_myFinder ? nullptr : g_taskbar);
     g_lastDpi = Dpi();
     Paint();
     g_lastW = -1;
-    Reposition();
-    ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
-    return true;
+    if (g_myFinder) WatchFinder(g_taskbar);
+    bool positioned = Reposition();
+    if (!g_myFinder) ShowWindow(g_wnd, SW_SHOWNOACTIVATE);
+    return positioned;
 }
 
 void Destroy() {
@@ -382,6 +467,7 @@ void Destroy() {
         PostMessageW(g_taskbar, WM_SIZE, SIZE_RESTORED, MAKELPARAM(r.right, r.bottom));
     }
     g_rebar = nullptr;
+    WatchFinder(nullptr);
     if (g_wbWake) WatchWidgetsButton(nullptr);
     if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
@@ -419,6 +505,27 @@ void SetBackground(bool on) {
 bool Reposition() {
     if (!Alive()) return false;
     if (Dpi() != g_lastDpi) { g_lastDpi = Dpi(); Paint(); }
+    if (g_myFinder) {
+        RECT bar;
+        GetClientRect(g_taskbar, &bar);
+        if (!IsWindowVisible(g_taskbar) || IsIconic(g_taskbar) || bar.right <= 0 || bar.bottom <= 0) {
+            ShowWindow(g_wnd, SW_HIDE);
+            return true;
+        }
+        if (bar.bottom != g_size.cy) Paint();
+        RECT screenBar;
+        GetWindowRect(g_taskbar, &screenBar);
+        int edge = FinderEdge(g_taskbar, screenBar);
+        int left = edge - g_size.cx - Px(8);
+        if (edge < 0 || left < 0) {
+            ShowWindow(g_wnd, SW_HIDE);
+            return false;
+        }
+        POINT origin{ left, 0 };
+        ClientToScreen(g_taskbar, &origin);
+        SetWindowPos(g_wnd, HWND_TOP, origin.x, origin.y, g_size.cx, g_size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        return true;
+    }
     HWND tray = FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr);
     if (!tray) return true;
     RECT tr, bar;

@@ -23,6 +23,18 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 
 **Tray icons:** one icon per device with the number drawn in it, plus a "Low battery" notification at 15%. The app switches to this automatically when the taskbar is vertical or can't be found.
 
+**MyDockFinder (experimental):** select *Show on MyFinder* in the app menu to display the same
+single strip of device icons and percentages immediately left of the right-hand system indicators.
+The strip aligns automatically, follows changes in the group, and cannot be dragged over other icons.
+Click it to open the usual app menu; select *Show on the taskbar* to switch back.
+A background thread asks MyFinder to render its own bar with `PrintWindow` about once a second,
+then locates the rightmost cluster of contrasting glyphs. It does not capture the desktop, save
+images, or transmit them. Missing or stale layout information falls back to tray icons.
+This is an owned transparent popup attached to the undocumented `MyFinderApp` window, rather than
+an item in MyFinder's internal layout. Only the first MyFinder bar is supported. Textured or
+low-contrast themes and unusually large gaps between indicators may confuse the visual alignment;
+changes can take around two seconds to follow. MyDockFinder version changes may affect compatibility.
+
 Hover for details. Click for the menu: every device (click one to hide or show it), display mode, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds, and right away when a device is plugged in or the PC wakes up.
 
 ## Supported devices

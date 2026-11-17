@@ -17,7 +17,9 @@ struct WidgetItem {
 };
 
 namespace widget {
-// Creates the widget on the primary taskbar. Clicks are reported by posting `clickMsg` to `notifyWnd`.
+// Experimental MyDockFinder host. The strip follows the right-hand system indicators.
+void SetMyFinder(bool on);
+// Creates the widget on the selected host. Clicks post `clickMsg` to `notifyWnd`.
 bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme);
 void Destroy();
 bool Alive();
@@ -26,6 +28,6 @@ void SetLightTheme(bool light);
 // Draws a rounded plate in the taskbar's colours behind the text (kept across Create/Destroy).
 void SetBackground(bool on);
 // Re-checks the taskbar layout and moves the widget if needed; call about once a second.
-// Returns false when the taskbar it was attached to is gone.
+// Returns false when the host is gone or MyFinder layout information is unavailable.
 bool Reposition();
 }

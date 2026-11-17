@@ -5,3 +5,5 @@ dist/
 third_party/
 .claude/
 CLAUDE.md
+
+.tools/
