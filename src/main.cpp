@@ -31,7 +31,7 @@ constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
 
 enum MenuId : UINT {
-    ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY,
+    ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT,
     ID_SMART = 200, ID_INTERVAL_FIRST = 210,
     ID_DEVICE_FIRST = 1000
 };
@@ -566,6 +566,7 @@ void ShowMenu() {
     AppendMenuW(m, MF_POPUP, reinterpret_cast<UINT_PTR>(intervals), L"Battery refresh interval");
     AppendMenuW(m, MF_STRING, ID_REFRESH, L"Refresh now");
     AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
+    AppendMenuW(m, MF_STRING, ID_SUPPORT, L"Support the project...");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
     POINT pt;
@@ -586,6 +587,7 @@ void ShowMenu() {
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MODE_WIDGET: SetMode(true); break;
         case ID_MODE_TRAY: SetMode(false); break;
+        case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://github.com/sponsors/krisgfx9", nullptr, nullptr, SW_SHOWNORMAL); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
             if (cmd >= ID_INTERVAL_FIRST && cmd < ID_INTERVAL_FIRST + sizeof(kIntervals) / sizeof(kIntervals[0])) {
