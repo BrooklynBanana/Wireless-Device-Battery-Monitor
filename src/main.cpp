@@ -20,13 +20,15 @@ namespace {
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
+constexpr UINT WM_WIDGET_MOVED = WM_APP + 4;  // wParam = side, lParam = slot
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
 constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
 constexpr int LOW_BATTERY = 15;
 constexpr UINT PLACEHOLDER_ID = 1;
 
-enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_DEVICE_FIRST = 1000 };
+enum MenuId : UINT { ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SIDE_RIGHT, ID_SIDE_LEFT,
+                     ID_DEVICE_FIRST = 1000 };
 
 const wchar_t* kAppName = L"Wireless Battery";
 const wchar_t* kRunKey = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
@@ -120,6 +122,27 @@ bool LoadWidgetMode() { return LoadBoolSetting(L"TaskbarWidget", true); }
 void SaveWidgetMode(bool on) { SaveBoolSetting(L"TaskbarWidget", on); }
 bool LoadHideLastKnown() { return LoadBoolSetting(L"HideLastKnownDevices", false); }
 void SaveHideLastKnown(bool on) { SaveBoolSetting(L"HideLastKnownDevices", on); }
+
+DWORD LoadDwordSetting(const wchar_t* name, DWORD defaultVal) {
+    DWORD v = defaultVal, sz = sizeof(v);
+    RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &v, &sz);
+    return v;
+}
+
+void SaveDwordSetting(const wchar_t* name, DWORD v) {
+    RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD, &v, sizeof(v));
+}
+
+// Where the widget stands on the taskbar (see widget::SetPlacement); set from the menu or by dragging.
+int g_widgetSide = widget::SideRight, g_widgetSlot = 0;
+
+void SetWidgetPlacement(int side, int slot) {
+    g_widgetSide = side;
+    g_widgetSlot = slot;
+    SaveDwordSetting(L"TaskbarSide", (DWORD)side);
+    SaveDwordSetting(L"TaskbarSlot", (DWORD)slot);
+    widget::SetPlacement(side, slot);
+}
 
 bool AutostartEnabled() {
     wchar_t buf[MAX_PATH * 2];
@@ -366,7 +389,6 @@ void UpdateWidget() {
         return ka != kb ? ka < kb : a->st.name < b->st.name;
     });
     std::vector<WidgetItem> items;
-    std::wstring tip;
     for (auto* e : list) {
         WidgetItem it;
         it.kind = e->st.kind;
@@ -376,12 +398,17 @@ void UpdateWidget() {
         it.dim = e->st.percent < 0;
         it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
         it.bluetooth = e->st.via == L"Bluetooth";
+        it.name = e->st.name;
+        std::vector<std::wstring> parts;
+        if (e->st.charging) parts.push_back(L"Charging");
+        if (e->st.asleep) parts.push_back(L"Asleep");
+        if (e->st.percent < 0 && e->lastPct >= 0) parts.push_back(L"Last known");
+        else if (it.low) parts.push_back(L"Low battery");
+        if (!e->st.via.empty()) parts.push_back(e->st.via);
+        for (size_t i = 0; i < parts.size(); i++) it.status += (i ? L" · " : L"") + parts[i];
         items.push_back(it);
-        if (!tip.empty()) tip += L"\n";
-        tip += e->st.name + L": " + StatusText(*e);
     }
-    if (tip.empty()) tip = L"Wireless Battery: no devices with battery info found";
-    widget::SetItems(items, tip);
+    widget::SetItems(items);
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
@@ -421,7 +448,10 @@ void OnResults(std::vector<DeviceStatus>& results) {
 // widget cannot be created (e.g. Explorer not ready yet). Called once a second.
 void Reconcile() {
     bool alive = g_wantWidget && widget::Alive();
-    if (g_wantWidget && !alive) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
+    if (g_wantWidget && !alive) {
+        widget::SetPlacement(g_widgetSide, g_widgetSlot);
+        alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, WM_WIDGET_MOVED, g_lightTaskbar);
+    }
     if (!g_wantWidget) widget::Destroy();
     bool changed = alive != g_useWidget;
     g_useWidget = alive;
@@ -479,6 +509,15 @@ void ShowMenu() {
     AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, L"Show on the taskbar (icon + percentage)");
     AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, L"Show as tray icons");
     CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
+    if (g_useWidget) {
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING, ID_SIDE_RIGHT, L"Place right of the Windows app icons");
+        AppendMenuW(m, MF_STRING | (widget::LeftSideAvailable() ? 0 : MF_GRAYED), ID_SIDE_LEFT,
+                    L"Place left of the Windows app icons");
+        CheckMenuRadioItem(m, ID_SIDE_RIGHT, ID_SIDE_LEFT, g_widgetSide == widget::SideLeft ? ID_SIDE_LEFT : ID_SIDE_RIGHT,
+                           MF_BYCOMMAND);
+        AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Tip: click and hold the widget to drag it");
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, ID_REFRESH, L"Refresh now");
     AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
@@ -496,6 +535,8 @@ void ShowMenu() {
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
         case ID_MODE_WIDGET: SetMode(true); break;
         case ID_MODE_TRAY: SetMode(false); break;
+        case ID_SIDE_RIGHT: SetWidgetPlacement(widget::SideRight, 0); break;
+        case ID_SIDE_LEFT: SetWidgetPlacement(widget::SideLeft, 0); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
             if (cmd >= ID_DEVICE_FIRST && cmd < ID_DEVICE_FIRST + keys.size()) {
@@ -547,6 +588,12 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         case WM_WIDGET_CLICK:
             ShowMenu();
+            return 0;
+        case WM_WIDGET_MOVED:  // dropped after a drag; the widget is already there
+            g_widgetSide = (int)wp;
+            g_widgetSlot = (int)lp;
+            SaveDwordSetting(L"TaskbarSide", (DWORD)wp);
+            SaveDwordSetting(L"TaskbarSlot", (DWORD)lp);
             return 0;
         case WM_ENDSESSION:  // sign-out / shutdown / installer restart manager
             if (wp) DestroyWindow(h);
@@ -654,6 +701,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_wantWidget = LoadWidgetMode();
     g_hideLastKnown = LoadHideLastKnown();
+    g_widgetSide = LoadDwordSetting(L"TaskbarSide", widget::SideRight) == widget::SideLeft ? widget::SideLeft : widget::SideRight;
+    g_widgetSlot = (int)std::min<DWORD>(LoadDwordSetting(L"TaskbarSlot", 0), 50);
     LoadHidden();
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
