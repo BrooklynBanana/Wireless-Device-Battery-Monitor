@@ -27,6 +27,8 @@ test:
 	@mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall tests/myfinder_layout_test.cpp -o build/myfinder_layout_test.exe
 	./build/myfinder_layout_test.exe
+	$(CXX) $(CXXFLAGS) -DUNICODE -D_UNICODE -static tests/myfinder_visibility_test.cpp -o build/myfinder_visibility_test.exe $(LIBS)
+	./build/myfinder_visibility_test.exe
 	$(CXX) $(CXXFLAGS) tests/steelseries_mouse_test.cpp src/drivers/steelseries.cpp -o build/steelseries_mouse_test.exe
 	./build/steelseries_mouse_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/rapoo_protocol_test.cpp -o build/rapoo_protocol_test.exe

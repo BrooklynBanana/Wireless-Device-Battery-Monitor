@@ -20,14 +20,34 @@ SIZE g_size{};
 
 const wchar_t* kClass = L"WirelessBatteryWidget";
 
-// Ask MyFinder to render its own bar, excluding our owned popup. No desktop pixels, files or
+// Ask MyFinder to render its own bar, excluding our separate popup. No desktop pixels, files or
 // network are involved. Keep the potentially blocking PrintWindow call off our UI thread.
 SRWLOCK g_finderLock = SRWLOCK_INIT;
 HWND g_finderHost = nullptr, g_finderResultHost = nullptr;
 RECT g_finderRect{};
 int g_finderEdge = -1;
+myfinder::Foreground g_finderForeground = myfinder::Foreground::Unknown;
 ULONGLONG g_finderUpdated = 0;
 HANDLE g_finderWake = nullptr;
+constexpr UINT kFinderOrderMessage = WM_APP + 51;
+HWINEVENTHOOK g_finderOrderHook = nullptr, g_finderForegroundHook = nullptr;
+bool g_finderOrderQueued = false;
+
+void CALLBACK FinderOrderEvent(HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) {
+    // MyFinder raises its bar on clicks. Repair order from that event, rather than
+    // letting the strip sit behind the bar until the next one-second layout tick.
+    if (!g_myFinder || !g_wnd || !g_taskbar || g_finderOrderQueued ||
+        GetWindow(g_taskbar, GW_HWNDPREV) == g_wnd) return;
+    g_finderOrderQueued = PostMessageW(g_wnd, kFinderOrderMessage, 0, 0) != FALSE;
+}
+
+void StopFinderOrderWatch() {
+    if (g_finderOrderHook) UnhookWinEvent(g_finderOrderHook);
+    if (g_finderForegroundHook) UnhookWinEvent(g_finderForegroundHook);
+    g_finderOrderHook = g_finderForegroundHook = nullptr;
+    g_finderOrderQueued = false;
+}
+
 
 DWORD WINAPI FinderLayoutThread(LPVOID) {
     for (;;) {
@@ -41,6 +61,7 @@ DWORD WINAPI FinderLayoutThread(LPVOID) {
         int w = rect.right - rect.left, h = rect.bottom - rect.top;
         if (w < 8 || w > 16384 || h < 4 || h > 256) continue;
         int edge = -1;
+        auto foreground = myfinder::Foreground::Unknown;
         HDC screen = GetDC(nullptr), mem = CreateCompatibleDC(screen);
         BITMAPINFO info{};
         info.bmiHeader = { sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB };
@@ -52,6 +73,7 @@ DWORD WINAPI FinderLayoutThread(LPVOID) {
             if (PrintWindow(host, mem, 2 /* PW_RENDERFULLCONTENT */)) {
                 GdiFlush();
                 edge = myfinder::GroupLeft(static_cast<const std::uint32_t*>(bits), w, h, std::max(24, h * 2));
+                foreground = myfinder::GlyphForeground(static_cast<const std::uint32_t*>(bits), w, h, edge);
             }
             SelectObject(mem, old);
         }
@@ -59,10 +81,16 @@ DWORD WINAPI FinderLayoutThread(LPVOID) {
         if (mem) DeleteDC(mem);
         if (screen) ReleaseDC(nullptr, screen);
         AcquireSRWLockExclusive(&g_finderLock);
-        g_finderResultHost = host;
-        g_finderRect = rect;
-        g_finderEdge = edge;
-        g_finderUpdated = GetTickCount64();
+        // A menu/transition can temporarily produce an empty or failed rendering.
+        // Keep the last good layout until its existing 3.5-second freshness limit;
+        // a failed sample must neither erase it immediately nor refresh its age.
+        if (g_finderHost == host && edge >= 0) {
+            g_finderResultHost = host;
+            g_finderRect = rect;
+            g_finderEdge = edge;
+            if (foreground != myfinder::Foreground::Unknown) g_finderForeground = foreground;
+            g_finderUpdated = GetTickCount64();
+        }
         ReleaseSRWLockExclusive(&g_finderLock);
     }
 }
@@ -71,6 +99,12 @@ void WatchFinder(HWND host) {
     AcquireSRWLockExclusive(&g_finderLock);
     bool changed = host != g_finderHost;
     g_finderHost = host;
+    if (changed) {
+        g_finderResultHost = nullptr;
+        g_finderEdge = -1;
+        g_finderForeground = myfinder::Foreground::Unknown;
+        g_finderUpdated = 0;
+    }
     ReleaseSRWLockExclusive(&g_finderLock);
     if (host && !g_finderWake) {
         g_finderWake = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -89,6 +123,13 @@ int FinderEdge(HWND host, const RECT& rect) {
 }
 
 
+
+myfinder::Foreground FinderForeground(HWND host) {
+    AcquireSRWLockShared(&g_finderLock);
+    auto value = g_finderResultHost == host ? g_finderForeground : myfinder::Foreground::Unknown;
+    ReleaseSRWLockShared(&g_finderLock);
+    return value;
+}
 
 int Dpi() {
     UINT d = g_taskbar ? GetDpiForWindow(g_taskbar) : 0;
@@ -366,6 +407,10 @@ void Paint() {
 
 LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case kFinderOrderMessage:
+            g_finderOrderQueued = false;
+            if (h == g_wnd && g_myFinder) widget::Reposition();
+            return 0;
         case WM_MOUSEMOVE:
             if (!g_hover) {
                 g_hover = true;
@@ -427,13 +472,19 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
         wc.lpszClassName = kClass;
         registered = RegisterClassExW(&wc) != 0;
     }
-    // MyFinder's compositor does not reliably display layered child surfaces. Use an owned popup
-    // there; Windows keeps it above its owner, without a taskbar entry or activating the app.
+    // Use an unowned tool popup: the host can hide its owned popups while showing
+    // indicator panels. Follow its geometry/z-order without joining that lifecycle.
     DWORD exStyle = WS_EX_LAYERED | WS_EX_NOACTIVATE | (g_myFinder ? WS_EX_TOOLWINDOW : 0);
     DWORD style = g_myFinder ? WS_POPUP : WS_CHILD | WS_CLIPSIBLINGS;
     g_wnd = CreateWindowExW(exStyle, kClass, L"Wireless Battery", style, 0, 0, 1, 1,
-                            g_taskbar, nullptr, inst, nullptr);
+                            g_myFinder ? nullptr : g_taskbar, nullptr, inst, nullptr);
     if (!g_wnd) { g_taskbar = nullptr; return false; }
+    if (g_myFinder) {
+        g_finderOrderHook = SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_LOCATIONCHANGE, nullptr,
+                                          FinderOrderEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+        g_finderForegroundHook = SetWinEventHook(EVENT_SYSTEM_FOREGROUND, EVENT_SYSTEM_FOREGROUND, nullptr,
+                                               FinderOrderEvent, 0, 0, WINEVENT_OUTOFCONTEXT);
+    }
 
     INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
     InitCommonControlsEx(&icc);
@@ -460,6 +511,7 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
 }
 
 void Destroy() {
+    StopFinderOrderWatch();
     if (g_rebar && IsWindow(g_rebar) && g_taskbar && IsWindow(g_taskbar)) {
         // Let Explorer lay the task buttons out again over the full width.
         RECT r;
@@ -492,6 +544,10 @@ void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip)
 }
 
 void SetLightTheme(bool light) {
+    if (g_myFinder) {
+        auto foreground = FinderForeground(g_taskbar);
+        if (foreground != myfinder::Foreground::Unknown) light = foreground == myfinder::Foreground::Dark;
+    }
     g_light = light;
     ApplyTipTheme();
     Paint();
@@ -506,6 +562,12 @@ bool Reposition() {
     if (!Alive()) return false;
     if (Dpi() != g_lastDpi) { g_lastDpi = Dpi(); Paint(); }
     if (g_myFinder) {
+        auto foreground = FinderForeground(g_taskbar);
+        if (foreground != myfinder::Foreground::Unknown && g_light != (foreground == myfinder::Foreground::Dark)) {
+            g_light = foreground == myfinder::Foreground::Dark;
+            ApplyTipTheme();
+            Paint();
+        }
         RECT bar;
         GetClientRect(g_taskbar, &bar);
         if (!IsWindowVisible(g_taskbar) || IsIconic(g_taskbar) || bar.right <= 0 || bar.bottom <= 0) {
@@ -523,7 +585,19 @@ bool Reposition() {
         }
         POINT origin{ left, 0 };
         ClientToScreen(g_taskbar, &origin);
-        SetWindowPos(g_wnd, HWND_TOP, origin.x, origin.y, g_size.cx, g_size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        // Use the host's z-order band, immediately above the bar but below its menus.
+        // Do not periodically promote the strip above all topmost windows.
+        bool hostTopmost = (GetWindowLongPtrW(g_taskbar, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        bool stripTopmost = (GetWindowLongPtrW(g_wnd, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+        if (hostTopmost != stripTopmost)
+            SetWindowPos(g_wnd, hostTopmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        HWND above = GetWindow(g_taskbar, GW_HWNDPREV);
+        UINT flags = SWP_NOACTIVATE | SWP_SHOWWINDOW;
+        if (above == g_wnd) flags |= SWP_NOZORDER;
+        else if (!above || ((GetWindowLongPtrW(above, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0) != hostTopmost)
+            above = hostTopmost ? HWND_TOPMOST : HWND_TOP;
+        SetWindowPos(g_wnd, above, origin.x, origin.y, g_size.cx, g_size.cy, flags);
         return true;
     }
     HWND tray = FindWindowExW(g_taskbar, nullptr, L"TrayNotifyWnd", nullptr);

@@ -29,9 +29,19 @@ The strip aligns automatically, follows changes in the group, and cannot be drag
 Click it to open the usual app menu; select *Show on the taskbar* to switch back.
 A background thread asks MyFinder to render its own bar with `PrintWindow` about once a second,
 then locates the rightmost cluster of contrasting glyphs. It does not capture the desktop, save
-images, or transmit them. Missing or stale layout information falls back to tray icons.
-This is an owned transparent popup attached to the undocumented `MyFinderApp` window, rather than
-an item in MyFinder's internal layout. Only the first MyFinder bar is supported. Textured or
+images, or transmit them. A failed sample keeps the last good alignment for up to 3.5 seconds;
+persistently missing or stale layout information falls back to tray icons.
+The transparent tool popup has no MyFinder owner, so opening a MyFinder indicator panel does
+not hide it with MyFinder's own popups. Wireless Battery manages its visibility and cleanup.
+Window-order changes are handled through WinEvents, so raising MyFinder does not leave the strip
+behind it until the next one-second layout tick. Neutral icons and percentages follow the light/dark
+glyph color actually rendered by MyFinder, independently of the Windows taskbar theme. Detection
+runs with the layout sample, approximately once a second; ambiguous colors keep the last choice. It follows the undocumented `MyFinderApp` window's
+geometry and z-order, rather than being an item in MyFinder's internal layout.
+MyFinder's Ctrl-drag rearrangement therefore does not apply to this combined strip; it does not
+reserve a slot among the native indicators. To use native notification icons instead of the
+combined strip, select *Show as tray icons* and expose those icons in MyFinder.
+Only the first MyFinder bar is supported. Textured or
 low-contrast themes and unusually large gaps between indicators may confuse the visual alignment;
 changes can take around two seconds to follow. MyDockFinder version changes may affect compatibility.
 
