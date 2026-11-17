@@ -422,11 +422,19 @@ void OnResults(std::vector<DeviceStatus>& results) {
         seen[s.key] = true;
         ApplyEntry(e);
     }
+    // Devices answering right now, by name: a device plugged in by cable (or on Bluetooth) also
+    // has an entry from its receiver, which stops answering then. Generic names are not matched.
+    std::set<std::wstring> liveNames;
+    for (auto& s : results)
+        if (s.connected && !s.asleep && s.percent >= 0 && s.name.find(L"wireless device") == std::wstring::npos)
+            liveNames.insert(s.name);
     for (auto it = g_entries.begin(); it != g_entries.end();) {
         auto& e = it->second;
-        // Some receivers drop sleeping devices from the link; keep showing the last value for a while.
+        // Some receivers drop sleeping devices from the link; keep showing the last value for a while,
+        // unless the same device is answering another way (then that one is the current value).
         bool inGrace = !seen.count(it->first) && e.st.graceSec > 0 && e.st.connected &&
-                       GetTickCount64() - e.lastSeen < (ULONGLONG)e.st.graceSec * 1000;
+                       GetTickCount64() - e.lastSeen < (ULONGLONG)e.st.graceSec * 1000 &&
+                       !liveNames.count(e.st.name);
         if (inGrace) {
             e.st.percent = -1;
             e.st.asleep = true;
