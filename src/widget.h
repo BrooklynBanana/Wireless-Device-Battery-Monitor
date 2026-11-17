@@ -23,6 +23,10 @@ void Destroy();
 bool Alive();
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip);
 void SetLightTheme(bool light);
+// The text the widget shows, for status bars that draw it themselves: "[icon] 30%  [icon] 93% [bolt]".
+// Icons are Segoe Fluent Icons / Segoe MDL2 Assets code points, so the font must provide them.
+// A trailing "!" marks a low battery (the widget draws it in red), "~" a stale (dimmed) value.
+std::wstring ItemsToText(const std::vector<WidgetItem>& items);
 // Draws a rounded plate in the taskbar's colours behind the text (kept across Create/Destroy).
 void SetBackground(bool on);
 // Re-checks the taskbar layout and moves the widget if needed; call about once a second.

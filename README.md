@@ -146,9 +146,36 @@ anywhere and run `WirelessBattery.exe`.
 
 ```
 WirelessBattery.exe --list   # print every device and its battery level, then exit
+WirelessBattery.exe --text   # print the taskbar text on one line (for status bars such as YASB), then exit
 WirelessBattery.exe --dump   # print every HID collection, plus raw Xenta (1D57) status frames (useful when asking for a new device)
 WirelessBattery.exe --quit   # close the running instance
 ```
+
+### In a status bar (YASB and similar)
+
+`--text` prints what the taskbar widget shows as a single line (an icon and a level per device, e.g. `<headset> 30%  <mouse> 93%`), with the same order, hidden devices and low-battery rule (shown as a trailing `!`). It prints nothing when there is no device. The icons are Segoe Fluent Icons (or Segoe MDL2 Assets on Windows 10) code points, so the bar has to draw the text with one of those fonts. A one-shot run has no memory of earlier readings: a device that is asleep right now shows `?`.
+
+A [YASB](https://github.com/amnweb/yasb) custom widget (adjust the path to your install):
+
+```yaml
+wireless_battery:
+  type: "yasb.custom.CustomWidget"
+  options:
+    label: "{data}"
+    class_name: "wireless-battery-widget"
+    exec_options:
+      run_cmd: '"%LOCALAPPDATA%\Programs\Wireless Battery\WirelessBattery.exe" --text'
+      run_interval: 60000
+      return_format: "string"
+      hide_empty: true
+      encoding: "utf-8"
+```
+
+```css
+.wireless-battery-widget .label { font-family: "Segoe Fluent Icons"; }
+```
+
+If your bar replaces the taskbar, close the tray app (`WirelessBattery.exe --quit`) and turn off *Start with Windows*, so that two copies do not poll the devices.
 
 ## Build
 

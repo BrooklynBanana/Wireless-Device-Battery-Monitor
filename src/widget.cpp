@@ -492,4 +492,21 @@ bool Reposition() {
     return true;
 }
 
+std::wstring ItemsToText(const std::vector<WidgetItem>& items) {
+    std::wstring out;
+    for (const auto& it : items) {
+        if (!out.empty()) out += L"  ";
+        out += Glyph(it.kind, it.bluetooth);
+        out += L' ';
+        if (it.dim && it.percent >= 0) out += L'~';
+        out += !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
+        if (it.charging) {
+            out += L' ';
+            out += kBolt;
+        }
+        if (it.low) out += L'!';
+    }
+    return out;
+}
+
 }  // namespace widget

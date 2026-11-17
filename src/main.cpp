@@ -420,21 +420,25 @@ std::vector<TrayEntry*> OrderedEntries(bool shownOnly) {
     return list;
 }
 
+WidgetItem ItemFor(const TrayEntry& e) {
+    WidgetItem it;
+    it.kind = e.st.kind;
+    it.percent = e.st.percent >= 0 ? e.st.percent : e.lastPct;
+    if (e.st.percent >= 0) it.text = e.st.levelText;
+    it.charging = e.st.charging;
+    it.dim = e.st.percent < 0;
+    it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
+    it.bluetooth = e.st.via == L"Bluetooth";
+    return it;
+}
+
 void UpdateWidget() {
     if (!g_useWidget) return;
     std::vector<TrayEntry*> list = OrderedEntries(true);
     std::vector<WidgetItem> items;
     std::wstring tip;
     for (auto* e : list) {
-        WidgetItem it;
-        it.kind = e->st.kind;
-        it.percent = e->st.percent >= 0 ? e->st.percent : e->lastPct;
-        if (e->st.percent >= 0) it.text = e->st.levelText;
-        it.charging = e->st.charging;
-        it.dim = e->st.percent < 0;
-        it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
-        it.bluetooth = e->st.via == L"Bluetooth";
-        items.push_back(it);
+        items.push_back(ItemFor(*e));
         if (!tip.empty()) tip += L"\n";
         tip += e->st.name + L": " + StatusText(*e);
     }
@@ -690,8 +694,23 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     return DefWindowProcW(h, msg, wp, lp);
 }
 
-// `WirelessBattery.exe --list` prints what it finds, `--dump` every HID collection.
-int ListToConsole(bool dump) {
+// What `--text` prints: the taskbar widget's content as one line of text, for status bars such as YASB.
+// Same order, hidden devices and low-battery rule as the widget (settings are read from the registry).
+// Empty when there is nothing to show. A one-shot run has no memory of earlier values, so a device that
+// is asleep right now shows "?".
+std::wstring ListAsText(const std::vector<DeviceStatus>& list) {
+    g_hideLastKnown = LoadHideLastKnown();
+    LoadHidden();
+    LoadOrder();
+    g_entries.clear();
+    for (const auto& s : list) g_entries[s.key].st = s;
+    std::vector<WidgetItem> items;
+    for (const TrayEntry* e : OrderedEntries(true)) items.push_back(ItemFor(*e));
+    return widget::ItemsToText(items);
+}
+
+// `WirelessBattery.exe --list` prints what it finds, `--text` the taskbar text, `--dump` every HID collection.
+int ListToConsole(bool dump, bool text) {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!out || out == INVALID_HANDLE_VALUE) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -708,6 +727,11 @@ int ListToConsole(bool dump) {
         return 0;
     }
     auto list = PollAllDevices();
+    if (text) {
+        std::wstring line = ListAsText(list);
+        if (!line.empty()) write(line + L"\n");
+        return 0;
+    }
     if (list.empty()) write(L"No devices with battery info found.\n");
     for (auto& s : list) {
         std::wstring line = s.name + L"  [" + s.via + L"]  ";
@@ -727,8 +751,9 @@ int ListToConsole(bool dump) {
 }  // namespace
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
-    if (cmdLine && wcsstr(cmdLine, L"--list")) return ListToConsole(false);
-    if (cmdLine && wcsstr(cmdLine, L"--dump")) return ListToConsole(true);
+    if (cmdLine && wcsstr(cmdLine, L"--list")) return ListToConsole(false, false);
+    if (cmdLine && wcsstr(cmdLine, L"--text")) return ListToConsole(false, true);
+    if (cmdLine && wcsstr(cmdLine, L"--dump")) return ListToConsole(true, false);
     if (cmdLine && wcsstr(cmdLine, L"--quit")) {  // used by the installer before upgrading/uninstalling
         if (HWND w = FindWindowW(L"WirelessBatteryWnd", nullptr)) {
             PostMessageW(w, WM_CLOSE, 0, 0);
