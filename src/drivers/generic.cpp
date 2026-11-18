@@ -10,6 +10,7 @@
 #include <initguid.h>
 #include <devpkey.h>
 
+#include <algorithm>
 #include <cstring>
 #include <map>
 
@@ -107,9 +108,15 @@ std::wstring HidContainer(const std::wstring& path) { return ContainerOf(path); 
 }  // namespace
 
 void PollGenericHid(PollContext& ctx) {
+    // Drawing tablets and pen displays (any collection on the Digitizers page 0D) are never read:
+    // polling one for a battery report flipped the Y axis of an XP-Pen Deco Fun S (issue #232).
+    std::vector<std::pair<USHORT, USHORT>> digitizers;
+    for (const auto& c : ctx.colls)
+        if (c.page() == 0x0D) digitizers.push_back({ c.vid, c.pid });
     for (const auto& c : ctx.colls) {
         if (ctx.IsClaimed(c.vid, c.pid)) continue;
         if (c.page() == 0x84 || c.page() == 0x85) continue;  // UPS / power supplies
+        if (std::find(digitizers.begin(), digitizers.end(), std::make_pair(c.vid, c.pid)) != digitizers.end()) continue;
         if (!c.caps.NumberFeatureValueCaps && !c.caps.NumberInputValueCaps) continue;
         // Same physical device already shown with Windows' Bluetooth level (its HID field can read 0).
         if (!ctx.btContainers.empty() && ctx.btContainers.count(ContainerOf(c.path))) continue;
@@ -251,6 +258,7 @@ void PollBluetooth(PollContext& ctx) {
         }
         // Bluetooth LE devices have no class of device; their HID collections tell a mouse from a keyboard.
         auto ids = hidIds.find(cid);
+        if (ids != hidIds.end()) s.vid = ids->second.first;
         if (s.kind == DeviceKind::Other && ids != hidIds.end()) s.kind = KindFromBleIds(ids->second.first, ids->second.second);
         if (s.kind == DeviceKind::Other && ids != hidIds.end()) s.kind = KindFromCollections(ctx.colls, ids->second.first, ids->second.second);
         if (s.kind == DeviceKind::Other) s.kind = GuessKind(s.name);
