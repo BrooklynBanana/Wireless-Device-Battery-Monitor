@@ -12,8 +12,10 @@
 //  * https://github.com/Doomguy-BFG9000/redragon-m913-battery-tray (M913 battery reader)
 //  * own capture of the official Redragon software against an M915RGB-WL on the 25A7:FA07
 //    receiver, which is what pinned down the two collections and the reply layout above.
-// Only the FA07/FA08 product ids are handled: the FA7B/FA7C family reports the level on a
-// different scale, and reporting it here would show a wrong percentage.
+// Only the FA07/FA08/FA99 product ids are handled: the FA7B/FA7C family reports the level on a
+// different scale, and reporting it here would show a wrong percentage. FA99 is the Xtrfy M4 RGB
+// Wireless (device request #2448, untested): its dump lists the same two collections, if1 FF02:0002
+// with a 17-byte feature report and if1 FF01:0000 with 17-byte input reports.
 #include "drivers.h"
 
 namespace {
@@ -73,7 +75,7 @@ bool Probe(PollContext& ctx, const HidColl& cmdColl, const HidColl& replyColl, U
 
 void PollAreson(PollContext& ctx) {
     for (auto [vid, pid] : ctx.Products(0x25A7)) {
-        if (pid != 0xFA07 && pid != 0xFA08) continue;  // FA7B/FA7C report the level on another scale
+        if (pid != 0xFA07 && pid != 0xFA08 && pid != 0xFA99) continue;  // FA7B/FA7C: another scale
         bool done = false;
         for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) {
                  return c.iface == 1 && c.page() == 0xFF02 && c.usage() == 0x0002 && c.featLen() >= 17;
