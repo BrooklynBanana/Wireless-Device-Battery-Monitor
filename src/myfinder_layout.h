@@ -8,15 +8,23 @@ inline int GroupLeft(const std::uint32_t* pixels, int width, int height, int max
     if (!pixels || width < 8 || height < 4 || maxGap < 1) return -1;
     int left = -1, blank = 0;
     for (int x = width - 3; x >= std::max(2, width / 2); --x) {
-        int hits = 0;
-        for (int y = 1; y < height - 1 && hits < 2; ++y) {
+        int hits = 0, run = 0, longestRun = 0;
+        for (int y = 1; y < height - 1; ++y) {
             auto a = pixels[y * width + x - 2], b = pixels[y * width + x + 2];
             int contrast = 0;
             for (int shift : {0, 8, 16})
                 contrast = std::max(contrast, std::abs(int((a >> shift) & 255) - int((b >> shift) & 255)));
-            if (contrast >= 40) ++hits;
+            if (contrast >= 40) {
+                ++hits;
+                longestRun = std::max(longestRun, ++run);
+            } else {
+                run = 0;
+            }
         }
-        if (hits >= 2) { left = x - 2; blank = 0; }
+        // A menu button's highlight can extend farther left than its glyph.
+        // Its nearly full-height edge should not move the whole strip.
+        const bool highlightEdge = height >= 16 && longestRun * 4 >= (height - 2) * 3;
+        if (hits >= 2 && !highlightEdge) { left = x - 2; blank = 0; }
         else if (++blank > (left < 0 ? maxGap * 3 : maxGap)) break;
     }
     // Reaching the search boundary is ambiguous, e.g. textured wallpaper.

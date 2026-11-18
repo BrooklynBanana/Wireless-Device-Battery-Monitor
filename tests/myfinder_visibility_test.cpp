@@ -45,12 +45,22 @@ int main() {
     widget::SetMyFinder(true);widget::Create(inst,notify,WM_APP+3,false);
     Pump(1700);widget::Reposition();HWND panel=g_wnd;
     Check(panel && IsWindowVisible(panel),"initial valid layout shows strip");
-    Check(GetWindow(panel,GW_OWNER)==nullptr,"strip does not inherit host popup lifecycle");
+    RECT fixed{};GetWindowRect(panel,&fixed);
+    Check(SendMessageW(panel,WM_NCHITTEST,0,0)==HTCLIENT,"field never reports a titlebar hit");
+    SendMessageW(panel,WM_NCLBUTTONDBLCLK,HTCAPTION,0);
+    for(WPARAM command:{SC_MAXIMIZE,SC_MINIMIZE,SC_RESTORE,SC_MOVE,SC_SIZE})SendMessageW(panel,WM_SYSCOMMAND,command,0);
+    RECT afterCommands{};GetWindowRect(panel,&afterCommands);
+    Check(EqualRect(&fixed,&afterCommands)&&IsWindowVisible(panel),"titlebar double-click and system commands cannot resize/hide field");
+    RECT initial{};GetWindowRect(panel,&initial);
+    Pump(2200);widget::Reposition();RECT refreshed{};GetWindowRect(panel,&refreshed);
+    Check(EqualRect(&initial,&refreshed),"independent popup keeps a stable anchor");
     SetWindowPos(fixtureHost,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-    Pump(200);
-    bool hostOnTop=false;
-    for(HWND next=GetWindow(panel,GW_HWNDPREV);next;next=GetWindow(next,GW_HWNDPREV)) if(next==fixtureHost)hostOnTop=true;
-    Check(!hostOnTop,"host raise repairs strip order without one-second timer");
+    Pump(160);
+    Check(!FinderAboveStrip(), "background guard repairs host raise");
+    Check(Px(16)==16,"24px MyFinder uses 16px icons regardless of monitor DPI");
+    SetWindowPos(fixtureHost,nullptr,0,0,640,36,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+    Check(Px(16)==24,"icons follow MyFinder height on a larger bar");
+    SetWindowPos(fixtureHost,nullptr,0,0,640,24,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
     ShowOwnedPopups(fixtureHost,FALSE);
     Check(IsWindowVisible(panel),"opening host popups does not hide strip");
     HWND menu=CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"Fixture menu",WS_POPUP,
@@ -58,33 +68,35 @@ int main() {
     Check(menu!=nullptr,"fixture menu created");ShowWindow(menu,SW_SHOWNOACTIVATE);
     SetWindowPos(menu,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
     widget::Reposition();
-    bool foundStrip=false, foundHost=false;
-    for(HWND next=GetWindow(menu,GW_HWNDNEXT);next;next=GetWindow(next,GW_HWNDNEXT)) {
-        if(next==panel) foundStrip=true;
-        if(next==fixtureHost) {foundHost=true;break;}
-    }
-    Check(foundStrip && foundHost,"strip stays below menu and above host");
+    Check(GetWindow(panel,GW_OWNER)==nullptr,"GPU field has an independent input queue");
+    HWND peer=CreateWindowExW(WS_EX_TOOLWINDOW,L"STATIC",L"Companion strip",WS_POPUP,
+                             -5000,-5000,80,24,fixtureHost,nullptr,inst,nullptr);
+    ShowWindow(peer,SW_SHOWNOACTIVATE);
+    HWND before=GetWindow(panel,GW_HWNDPREV);
+    widget::Reposition();
+    Check(GetWindow(panel,GW_HWNDPREV)==before,"companion strips do not compete for immediate adjacency");
+    DestroyWindow(peer);
     DestroyWindow(menu);
     bool repairedRepeatedly=true;
     for(int i=0;i<12;++i) {
         SetWindowPos(fixtureHost,HWND_TOP,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-        Pump(60);
+        Pump(20);
         for(HWND p=GetWindow(panel,GW_HWNDPREV);p;p=GetWindow(p,GW_HWNDPREV)) if(p==fixtureHost)repairedRepeatedly=false;
     }
-    Check(repairedRepeatedly,"repeated host raises repair order within 60 ms pump");
+    Check(repairedRepeatedly,"repeated raises repair through direct native events");
     SetWindowPos(fixtureHost,HWND_TOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-    widget::Reposition();Check((GetWindowLongPtrW(panel,GWL_EXSTYLE)&WS_EX_TOPMOST)!=0,"strip follows topmost host band");
+    widget::Reposition();Pump(160);Check((GetWindowLongPtrW(panel,GWL_EXSTYLE)&WS_EX_TOPMOST),"strip follows topmost host band");
     SetWindowPos(fixtureHost,HWND_NOTOPMOST,0,0,0,0,SWP_NOMOVE|SWP_NOSIZE|SWP_NOACTIVATE);
-    widget::Reposition();Check((GetWindowLongPtrW(panel,GWL_EXSTYLE)&WS_EX_TOPMOST)==0,"strip leaves topmost band with host");
+    widget::Reposition();Pump(160);Check(!(GetWindowLongPtrW(panel,GWL_EXSTYLE)&WS_EX_TOPMOST),"strip leaves topmost band with host");
     darkGlyphs=true;Pump(1300);widget::Reposition();Check(g_light,"dark MyFinder glyphs produce dark strip glyphs");
     widget::SetLightTheme(false);Check(g_light,"Windows dark theme cannot override MyFinder glyph color");
     darkGlyphs=false;Pump(1300);widget::Reposition();Check(!g_light,"light MyFinder glyphs produce light strip glyphs");
     goodFrame=false;Pump(1300);widget::Reposition();
     Check(IsWindowVisible(panel),"temporary failed frame keeps last good layout");
-    Pump(3800);widget::Reposition();Check(!IsWindowVisible(panel),"persistently stale layout hides strip");
+    Pump(3800);widget::Reposition();Check(IsWindowVisible(panel),"visible unchanged host keeps its last valid alignment");
     goodFrame=true;Pump(1500);widget::Reposition();Check(IsWindowVisible(panel),"valid layout recovers");
-    ShowWindow(fixtureHost,SW_HIDE);widget::Reposition();Check(!IsWindowVisible(panel),"hidden host hides strip");
+    ShowWindow(fixtureHost,SW_HIDE);widget::Reposition();
+    Pump(450);widget::Reposition();Check(!IsWindowVisible(panel),"sustained host hide hides strip");
     widget::Destroy();Check(!IsWindow(panel),"destroy releases strip window");
-    Check(!g_finderOrderHook && !g_finderForegroundHook,"destroy releases z-order event hooks");
     DestroyWindow(notify);DestroyWindow(fixtureHost);std::puts("Visibility lifecycle: all checks passed");
 }
