@@ -9,6 +9,7 @@
 #include <atomic>
 #include <climits>
 #include <cstdio>
+#include <ctime>
 #include <cwchar>
 #include <map>
 #include <set>
@@ -19,6 +20,7 @@
 #include "alert_rules.h"
 #include "devices.h"
 #include "battery_history.h"
+#include "charge_estimate.h"
 #include "i18n.h"
 #include "json_output.h"
 #include "labels.h"
@@ -45,7 +47,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
-    ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY,
+    ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_SHORT_RUNTIME_ALERT,
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
     ID_UPDATE = 200, ID_AUTO_UPDATE,
     ID_LANG_AUTO = 400, ID_LANG_ADD, ID_LANG_FIRST,  // "Language": ID_LANG_FIRST + 0..63
@@ -73,6 +75,7 @@ bool g_useWidget = false;      // what is actually shown right now
 bool g_hideLastKnown = false;  // hide (last known) / asleep devices from taskbar and tray
 bool g_showDisconnectedDevices = false;  // opt-in, explicit driver-reported offline devices only
 bool g_recordHistory = true;  // save readings for "Battery history..." (menu option, on by default)
+bool g_shortRuntimeAlert = true;  // "charge today" notification when the time-to-empty is under 12 h (menu option)
 std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all", "main" or one monitor id
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
 bool g_stacked = false;      // icon above the percentage (menu option)
@@ -86,6 +89,8 @@ struct TrayEntry {
     ULONGLONG lastSeen = 0;
     bool added = false;
     bool lowWarned = false;
+    bool shortWarned = false;  // "charge today" already shown during this discharge
+    charge::Tracker charge;    // readings of the current charge, for "full in ~40 min"
     std::wstring iconSig;    // what the current icon shows, to avoid needless redraws
     HICON icon = nullptr;
 };
@@ -434,6 +439,15 @@ void CopyTip(wchar_t* dst, size_t cap, const std::wstring& s) {
     dst[cap - 1] = 0;
 }
 
+// "~40 min", "~1 h 20 min": rounded to 5 minutes, then to 10 above an hour (it is an estimate).
+std::wstring ApproxMinutes(int mins) {
+    if (mins < 60) return TF(L"~{minutes} min", { { L"minutes", std::to_wstring(std::max(5, (mins + 2) / 5 * 5)) } });
+    int h = mins / 60, m = (mins % 60 + 5) / 10 * 10;
+    if (m == 60) { h++; m = 0; }
+    return m ? TF(L"~{hours} h {minutes} min", { { L"hours", std::to_wstring(h) }, { L"minutes", std::to_wstring(m) } })
+             : TF(L"~{hours} h", { { L"hours", std::to_wstring(h) } });
+}
+
 std::wstring StatusText(const TrayEntry& e) {
     const auto& s = e.st;
     if (!s.connected) return T(L"off / not connected");
@@ -444,6 +458,8 @@ std::wstring StatusText(const TrayEntry& e) {
     else t = T(L"unknown");
     if (!s.detail.empty() && s.percent >= 0) t += L" (" + s.detail + L")";
     if (s.full || (s.charging && s.percent >= 100)) t += std::wstring(L", ") + T(L"fully charged");
+    else if (int mins = s.charging ? charge::MinutesToFull(e.charge, (int64_t)time(nullptr)) : -1; mins > 0)
+        t += std::wstring(L", ") + T(L"charging") + L", " + TF(L"full in {time}", { { L"time", ApproxMinutes(mins) } });
     else if (s.charging) t += std::wstring(L", ") + T(L"charging");
     if (s.asleep) t += std::wstring(L", ") + T(L"asleep");
     return t;
@@ -478,10 +494,7 @@ void TrayDelete(UINT uid) {
     Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
-void ShowBatteryAlert(TrayEntry& e) {
-    const std::wstring title = T(L"Low battery");
-    const std::wstring message = TF(L"{name} is at {percent}%",
-                                   { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } });
+void ShowNotification(TrayEntry& e, const std::wstring& title, const std::wstring& message) {
     if (!g_useWidget && e.added) {
         TrayCall(NIM_MODIFY, e.uid, e.icon, DisplayName(e) + L"\n" + StatusText(e), title.c_str(), message);
         return;
@@ -493,6 +506,16 @@ void ShowBatteryAlert(TrayEntry& e) {
              L"BatteryHub", title.c_str(), message);
     g_alertIconAdded = true;
     SetTimer(g_hwnd, TIMER_ALERT_ICON, 60 * 1000, nullptr);
+}
+
+void ShowBatteryAlert(TrayEntry& e) {
+    ShowNotification(e, T(L"Low battery"), TF(L"{name} is at {percent}%",
+                                              { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } }));
+}
+
+// The time-to-empty estimate says the device will not last the next 12 hours: once per discharge.
+void ShowShortRuntimeAlert(TrayEntry& e, const std::wstring& left) {
+    ShowNotification(e, T(L"Charge today"), TF(L"{name} may run out in {time}", { { L"name", DisplayName(e) }, { L"time", left } }));
 }
 
 void UpdatePlaceholder() {
@@ -623,8 +646,23 @@ void OnResults(std::vector<DeviceStatus>& results) {
         if (g_alertLatches.size() > 256) g_alertLatches.erase(g_alertLatches.begin());
         if (g_recordHistory && s.connected && !s.asleep && s.percent >= 0)
             battery_history::Observe(s.key, s.percent, s.charging);
+        if (s.connected && !s.asleep) charge::Observe(e.charge, s.charging, s.percent, (int64_t)time(nullptr));
+        bool shortRuntime = false;
+        std::wstring left;
+        if (g_shortRuntimeAlert && !notify && !IsHidden(s.key) && s.connected && !s.asleep && s.percent >= 0) {
+            int threshold = alerts::EffectiveThreshold(g_alertOverrides, s.key);
+            double hours = s.charging ? -1 : battery_history::HoursRemaining(s.key);
+            if (threshold != alerts::kDisabled &&
+                charge::ShouldWarnShortRuntime(hours, s.charging, s.percent, threshold, e.shortWarned)) {
+                shortRuntime = true;
+                left = battery_history::RemainingText(s.key);
+            }
+        } else if (s.charging) {
+            e.shortWarned = false;
+        }
         ApplyEntry(e);
         if (notify) ShowBatteryAlert(e);
+        else if (shortRuntime && !left.empty()) ShowShortRuntimeAlert(e, left);
     }
     for (auto it = g_entries.begin(); it != g_entries.end();) {
         auto& e = it->second;
@@ -851,6 +889,8 @@ void ShowMenu() {
     AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, T(L"Hide last known / asleep devices"));
     AppendMenuW(m, MF_STRING | (g_showDisconnectedDevices ? MF_CHECKED : 0), ID_SHOW_DISCONNECTED, T(L"Show disconnected devices"));
     AppendMenuW(m, MF_STRING | (g_recordHistory ? MF_CHECKED : 0), ID_RECORD_HISTORY, T(L"Record battery history"));
+    AppendMenuW(m, MF_STRING | (g_shortRuntimeAlert ? MF_CHECKED : 0) | (g_recordHistory ? 0 : MF_GRAYED), ID_SHORT_RUNTIME_ALERT,
+                T(L"Warn when a battery won't last the day"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, T(L"Show on the taskbar (icon + percentage)"));
     AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, T(L"Show as tray icons"));
@@ -937,6 +977,7 @@ void ShowMenu() {
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
         case ID_SHOW_DISCONNECTED: SetShowDisconnectedDevices(!g_showDisconnectedDevices); break;
         case ID_RECORD_HISTORY: g_recordHistory = !g_recordHistory; SaveRecordHistory(g_recordHistory); break;
+        case ID_SHORT_RUNTIME_ALERT: g_shortRuntimeAlert = !g_shortRuntimeAlert; SaveBoolSetting(L"ShortRuntimeAlert", g_shortRuntimeAlert); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MONITOR_ALL: SetWidgetMonitor(L"all"); break;
         case ID_LANG_AUTO: SetLanguage(L""); break;
@@ -1266,6 +1307,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_hideLastKnown = LoadHideLastKnown();
     g_showDisconnectedDevices = LoadShowDisconnectedDevices();
     g_recordHistory = LoadRecordHistory();
+    g_shortRuntimeAlert = LoadBoolSetting(L"ShortRuntimeAlert", true);
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();
     g_stacked = LoadStacked();
