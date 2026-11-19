@@ -21,12 +21,15 @@
 namespace {
 
 // One GetPower exchange. percent is 0..100, or -1 when the mouse never answered.
+// `flexible` also accepts the sibling Fantech reply layout (level 0..100 directly), used by some
+// 25A7 receivers such as the Xtrfy M4 (FA99): the level is then at byte 5/6 instead of byte 6 in
+// tens. Both variants answer the same read-only 08 04 request, so nothing new is sent to the mouse.
 struct Power {
     int percent = -1;
     bool charging = false;
 };
 
-bool QueryPower(HidDev& cmd, HidDev& reply, Power& out) {
+bool QueryPower(HidDev& cmd, HidDev& reply, Power& out, bool flexible) {
     std::vector<BYTE> req(17, 0);
     req[0] = 0x08;  // report id
     req[1] = 0x04;  // GetPower
@@ -41,10 +44,27 @@ bool QueryPower(HidDev& cmd, HidDev& reply, Power& out) {
         if (reply.Read(r, 1800) < 17) continue;  // asleep or out of range
         unsigned total = 0;
         for (BYTE b : r) total += b;
-        if ((total & 0xFF) != 0x55 || r[0] != 0x09 || r[1] != 0x04 || r[2] != 0x00 || r[6] > 10) continue;
-        out.percent = Clamp100(r[6] * 10);
-        out.charging = r[7] != 0;
-        return true;
+        if ((total & 0xFF) == 0x55 && r[0] == 0x09 && r[1] == 0x04 && r[2] == 0x00 && r[6] <= 10) {
+            out.percent = Clamp100(r[6] * 10);  // Areson: level in tens (0..10)
+            out.charging = r[7] != 0;
+            return true;
+        }
+        if (flexible) {
+            // Fantech-style reply: the command byte can be at index 0 or 1, and the level is
+            // a plain percentage. Accepted only for products we know need it (FA99).
+            auto plausible = [&](size_t level, size_t charge) {
+                if (r.size() <= charge) return false;
+                int p = r[level], c = r[charge];
+                if (p < 1 || p > 100 || c > 1) return false;
+                out.percent = p;
+                out.charging = c != 0;
+                return true;
+            };
+            if (r[0] == 0x04 && plausible(5, 6)) return true;
+            if (r[0] == 0x04 && plausible(4, 5)) return true;
+            if (r[1] == 0x04 && plausible(6, 7)) return true;
+        }
+        continue;
     }
     return false;
 }
@@ -57,11 +77,11 @@ bool Probe(PollContext& ctx, const HidColl& cmdColl, const HidColl& replyColl, U
     HidDev reply;
     if (!reply.Open(replyColl)) return false;
     Power p;
-    if (!QueryPower(cmd, reply, p)) return false;
+    if (!QueryPower(cmd, reply, p, pid == 0xFA99)) return false;
 
     DeviceStatus s;
     s.key = L"areson:" + Hex4(vid) + L":" + Hex4(pid);
-    s.name = L"Redragon wireless mouse";
+    s.name = pid == 0xFA99 ? L"Xtrfy M4 RGB Wireless" : L"Redragon wireless mouse";
     s.kind = DeviceKind::Mouse;
     s.via = L"2.4 GHz receiver";
     s.percent = p.percent;
