@@ -10,7 +10,8 @@
 
 namespace {
 
-HWND g_wnd, g_taskbar, g_notify, g_rebar;
+HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
+bool g_cardOn = true, g_chartOn = true;  // hover card and its 24-hour chart (menu options); card off = plain tooltip
 UINT g_clickMsg;
 bool g_light, g_hover;
 bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
@@ -232,6 +233,17 @@ RECT WidgetsButtonRect() {
     RECT r = g_wbRectBar && g_wbRectBar == g_wbTaskbar ? g_wbRect : RECT{};
     ReleaseSRWLockShared(&g_wbLock);
     return r;
+}
+
+void ApplyTipTheme() {
+    if (!g_tip) return;
+    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
+    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
+    static auto setTheme = ux ? (SetWindowThemeFn)GetProcAddress(ux, "SetWindowTheme") : nullptr;
+    if (setTheme) {
+        setTheme(g_tip, g_light ? L"Explorer" : L"DarkMode_Explorer", nullptr);
+        SendMessageW(g_tip, WM_THEMECHANGED, 0, 0);
+    }
 }
 
 wchar_t Glyph(DeviceKind k, bool bluetooth) {
@@ -694,9 +706,31 @@ void PositionMirror(Mirror& m) {
 }
 
 // The summary text is the strip's window name, so screen readers still read the levels.
-void SetSummary(HWND w) { SetWindowTextW(w, g_tipText.empty() ? L"BatteryHub" : g_tipText.c_str()); }
+// The summary text is the strip's window name (read by screen readers) and the plain tooltip's text, which is
+// shown instead of the card when the card is turned off.
+void SetSummary(HWND w) {
+    const wchar_t* text = g_tipText.empty() ? L"BatteryHub" : g_tipText.c_str();
+    SetWindowTextW(w, text);
+    if (!g_tip) return;
+    TTTOOLINFOW ti{ sizeof(ti) };
+    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+    ti.hwnd = g_notify;
+    ti.uId = (UINT_PTR)w;
+    ti.lpszText = const_cast<wchar_t*>(text);
+    TTTOOLINFOW probe{ sizeof(probe) };
+    probe.hwnd = g_notify;
+    probe.uId = (UINT_PTR)w;
+    bool known = SendMessageW(g_tip, TTM_GETTOOLINFOW, 0, (LPARAM)&probe) != 0;
+    SendMessageW(g_tip, known ? TTM_UPDATETIPTEXTW : TTM_ADDTOOLW, 0, (LPARAM)&ti);
+}
 
 void DestroyMirror(Mirror& m) {
+    if (g_tip) {
+        TTTOOLINFOW ti{ sizeof(ti) };
+        ti.hwnd = g_notify;
+        ti.uId = (UINT_PTR)m.wnd;
+        SendMessageW(g_tip, TTM_DELTOOLW, 0, (LPARAM)&ti);
+    }
     if (m.wnd && IsWindow(m.wnd)) DestroyWindow(m.wnd);
     m.wnd = nullptr;
 }
@@ -941,7 +975,8 @@ void ShowCard(HWND strip, int item) {
     struct Line { Mask m; Rgb c; int x, y; };
     std::vector<Line> lines;
     Mask glyph;
-    int W = minW, y = pad, barY = -1, pct = -1, barAlpha = 255;
+    int W = minW, y = pad, barY = -1, pct = -1, barAlpha = 255, chartY = -1;
+    std::vector<std::pair<long long, int>> chart;
     Rgb barColor = fg;
     if (message) {
         size_t start = 0;
@@ -994,6 +1029,16 @@ void ShowCard(HWND strip, int item) {
             lines.push_back({ std::move(m), sub, pad, y });
             y += lines.back().m.h + Px(2);
         }
+        // small chart of the last 24 hours (recorded readings only, like the history window)
+        if (g_chartOn && it.trend.size() >= 2) {
+            y += Px(8);
+            Mask cap = RenderLine(T(L"Last 24 hours"), body);
+            lines.push_back({ std::move(cap), sub, pad, y });
+            y += lines.back().m.h + Px(4);
+            chartY = y;
+            chart = it.trend;
+            y += Px(44);
+        }
         y += pad - Px(2);
         // the icon goes first, drawn in the device's colour like the strip
         lines.insert(lines.begin(), Line{ std::move(glyph), it.accent != Accent::None
@@ -1015,6 +1060,45 @@ void ShowCard(HWND strip, int item) {
         int bw = W - 2 * pad, bh = Px(6);
         FillRound(cv, pad, barY, bw, bh, bh / 2, track, g_light ? 28 : 40);
         if (pct > 0) FillRound(cv, pad, barY, std::max(bh, bw * std::min(pct, 100) / 100), bh, bh / 2, barColor, barAlpha);
+    }
+    if (chartY >= 0) {
+        // x: 24 hours ago .. now; y: 0 .. 100%. Readings more than 3 hours apart are not joined (a gap stays a gap).
+        const int cx = pad, cw = W - 2 * pad, ch = Px(44);
+        const double span = 24.0 * 3600.0;
+        auto X = [&](long long ago) { return cx + (span + (double)ago) / span * (cw - 1); };
+        auto Y = [&](int p) { return chartY + (100 - std::max(0, std::min(p, 100))) / 100.0 * (ch - 1); };
+        for (int yy : { chartY, chartY + ch / 2, chartY + ch - 1 })  // faint 100% / 50% / 0% guides
+            for (int xx = cx; xx < cx + cw; xx++) cv.Blend(xx, yy, track, g_light ? 18 : 24);
+        // soft dot used to draw an anti-aliased line two pixels wide
+        auto dot = [&](double fx, double fy, int alpha) {
+            int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+            double ax = fx - x0, ay = fy - y0;
+            cv.Blend(x0, y0, barColor, (int)(alpha * (1 - ax) * (1 - ay)));
+            cv.Blend(x0 + 1, y0, barColor, (int)(alpha * ax * (1 - ay)));
+            cv.Blend(x0, y0 + 1, barColor, (int)(alpha * (1 - ax) * ay));
+            cv.Blend(x0 + 1, y0 + 1, barColor, (int)(alpha * ax * ay));
+        };
+        for (size_t i = 0; i + 1 < chart.size(); i++) {
+            const auto& a = chart[i];
+            const auto& b = chart[i + 1];
+            if (b.first - a.first > 3 * 3600) continue;
+            double x1 = X(a.first), y1 = Y(a.second), x2 = X(b.first), y2 = Y(b.second);
+            for (int xx = (int)std::ceil(x1); xx <= (int)std::floor(x2); xx++) {  // light area under the line
+                double t = x2 > x1 ? (xx - x1) / (x2 - x1) : 0;
+                for (int yy = (int)std::ceil(y1 + (y2 - y1) * t); yy < chartY + ch; yy++) cv.Blend(xx, yy, barColor, g_light ? 34 : 44);
+            }
+            double len = std::max(1.0, std::hypot(x2 - x1, y2 - y1));
+            for (double s = 0; s <= len; s += 0.25) {
+                double fx = x1 + (x2 - x1) * s / len, fy = y1 + (y2 - y1) * s / len;
+                dot(fx, fy - 0.5, 90);
+                dot(fx, fy + 0.5, 90);
+            }
+        }
+        const auto& last = chart.back();  // the latest reading as a dot
+        double lx = X(last.first), ly = Y(last.second);
+        for (int yy = -2; yy <= 2; yy++)
+            for (int xx = -2; xx <= 2; xx++)
+                if (xx * xx + yy * yy <= 5) cv.Blend((int)lx + xx, (int)ly + yy, barColor, 255);
     }
     for (const auto& l : lines) cv.Draw(l.m, l.x, l.y, l.c, 255);
 
@@ -1085,6 +1169,7 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
             TrackMouseEvent(&t);
             SetHover(h, true);
+            if (!g_cardOn) return 0;  // card turned off: the plain tooltip shows the summary instead
             POINT p{ (short)LOWORD(lp), (short)HIWORD(lp) };
             int k = ItemAt(h, p);
             if (k != g_hoverItem || h != g_cardStrip) {
@@ -1157,6 +1242,15 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
                             g_taskbar, nullptr, inst, nullptr);
     if (!g_wnd) { g_taskbar = nullptr; return false; }
 
+    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
+    InitCommonControlsEx(&icc);
+    g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
+                            notifyWnd, nullptr, inst, nullptr);
+    if (g_tip) {
+        ApplyTipTheme();
+        SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
+        SendMessageW(g_tip, TTM_ACTIVATE, !g_cardOn, 0);  // the card replaces it while the card is on
+    }
     SetSummary(g_wnd);
     WatchWidgetsButton(g_taskbar);
     g_lastDpi = Dpi();
@@ -1181,6 +1275,7 @@ void Destroy() {
     g_primaryHidden = false;  // the next Create() decides again
     if (g_wbWake) WatchWidgetsButton(nullptr);
     if (g_card) { DestroyWindow(g_card); g_card = nullptr; }
+    if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
     g_cardItem = g_hoverItem = -1;
     g_cardStrip = nullptr;
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
@@ -1205,8 +1300,17 @@ void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip)
     }
 }
 
+void SetCardOptions(bool card, bool chart) {
+    g_cardOn = card;
+    g_chartOn = chart;
+    if (g_tip) SendMessageW(g_tip, TTM_ACTIVATE, !card, 0);
+    if (!card) HideCard();
+    else if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) ShowCard(g_cardStrip, g_cardItem);
+}
+
 void SetLightTheme(bool light) {
     g_light = light;
+    ApplyTipTheme();
     PaintAll();
     if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) ShowCard(g_cardStrip, g_cardItem);
 }

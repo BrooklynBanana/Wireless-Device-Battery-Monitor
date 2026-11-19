@@ -23,6 +23,8 @@ struct WidgetItem {
     std::wstring name;               // display name (custom name when renamed)
     std::wstring status;             // "49%, charging", "asleep" ...
     std::vector<std::wstring> info;  // extra lines: estimated time to empty, connection
+    // Recorded levels of the last 24 hours for the card's small chart: {seconds ago (<= 0), percent}.
+    std::vector<std::pair<long long, int>> trend;
 };
 
 namespace widget {
@@ -31,6 +33,9 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme);
 void Destroy();
 bool Alive();
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip);
+// The card shown when the mouse rests on a device (on by default), and its 24-hour chart (on by default).
+// With the card off, the summary is shown as a plain tooltip instead.
+void SetCardOptions(bool card, bool chart);
 void SetLightTheme(bool light);
 // Draws a rounded plate in the taskbar's colours behind the text (kept across Create/Destroy).
 void SetBackground(bool on);

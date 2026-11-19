@@ -575,6 +575,17 @@ std::wstring RemainingText(const std::wstring& key) {
     return forecast.state == RuntimeState::Ready ? FormatRemaining(forecast.hoursRemaining) : L"";
 }
 
+std::vector<Point> Recent(const std::wstring& key, int hours) {
+    std::vector<Point> out;
+    if (key.empty() || hours <= 0) return out;
+    const int64_t now = UtcNow();
+    const auto points = g_demo ? DemoSamples(now) : g_store.For(key, now - (int64_t)hours * 3600, now);
+    for (const auto& s : points)
+        if (s.timestamp >= now - (int64_t)hours * 3600) out.push_back({ s.timestamp - now, s.percent, s.charging });
+    std::sort(out.begin(), out.end(), [](const Point& a, const Point& b) { return a.secondsAgo < b.secondsAgo; });
+    return out;
+}
+
 void Show(HWND owner, const std::wstring& key, const std::wstring& displayName) {
     if (key.empty()) return;
     g_key = key;
