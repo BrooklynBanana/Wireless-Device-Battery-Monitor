@@ -615,6 +615,11 @@ void UpdateWidget() {
         if (!offline && !e->st.charging) {
             it.hoursLeft = battery_history::HoursRemaining(e->st.key);
             it.hoursLeftText = battery_history::RemainingText(e->st.key);
+            if (it.hoursLeft < 0) {  // not enough for the estimate yet: a rough one, marked as approximate
+                it.hoursLeft = battery_history::RoughHoursRemaining(e->st.key);
+                if (it.hoursLeft >= 0)
+                    it.hoursLeftText = TF(L"{time} (approx.)", { { L"time", battery_history::FormatHours(it.hoursLeft) } });
+            }
             if (!it.hoursLeftText.empty()) it.info.push_back(std::wstring(T(L"Estimated time to empty")) + L": " + it.hoursLeftText);
         }
         if (!e->st.via.empty() && e->st.via != L"demo") it.info.push_back(T(e->st.via));

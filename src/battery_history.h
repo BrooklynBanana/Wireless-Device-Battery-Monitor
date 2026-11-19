@@ -12,6 +12,11 @@ void Observe(const std::wstring& key, int percent, bool charging);
 // few or stale readings); RemainingText formats it ("~3 d 4 h") or returns an empty string.
 double HoursRemaining(const std::wstring& key);
 std::wstring RemainingText(const std::wstring& key);
+// A rough time-to-empty for the hover card while the estimate above is not ready yet: the current discharge
+// from as little as 1 hour and 1 percentage point of decline. Always shown as approximate; never used for
+// notifications. -1 when there is not even that.
+double RoughHoursRemaining(const std::wstring& key);
+std::wstring FormatHours(double hours);
 // The recorded readings of the last `hours`, oldest first, for the small chart in the hover card.
 // secondsAgo is negative (0 = now); nothing is interpolated.
 struct Point { long long secondsAgo; int percent; bool charging; };

@@ -580,6 +580,27 @@ std::wstring RemainingText(const std::wstring& key) {
     return hours >= 0 ? FormatRemaining(hours) : L"";
 }
 
+std::wstring FormatHours(double hours) { return FormatRemaining(hours); }
+
+double RoughHoursRemaining(const std::wstring& key) {
+    if (key.empty()) return -1;
+    const int64_t now = UtcNow();
+    auto points = g_demo ? DemoSamples(now) : g_store.For(key, now - kRetentionSeconds, now);
+    if (points.size() < 2) return -1;
+    std::stable_sort(points.begin(), points.end(), [](const Sample& a, const Sample& b) { return a.timestamp < b.timestamp; });
+    const Sample& latest = points.back();
+    if (latest.charging || latest.percent <= 0 || now - latest.timestamp > 24 * 3600) return -1;
+    // the current discharge: back from the latest reading while not charging and not rising
+    size_t start = points.size() - 1;
+    while (start > 0 && !points[start - 1].charging && points[start - 1].percent >= points[start].percent) --start;
+    const double hours = (latest.timestamp - points[start].timestamp) / 3600.0;
+    const int drop = points[start].percent - latest.percent;
+    if (hours < 1.0 || drop < 1) return -1;
+    const double perHour = drop / hours;
+    const double left = latest.percent / perHour;
+    return std::isfinite(left) && left <= 90.0 * 24.0 ? left : -1;
+}
+
 std::vector<Point> Recent(const std::wstring& key, int hours) {
     std::vector<Point> out;
     if (key.empty() || hours <= 0) return out;
