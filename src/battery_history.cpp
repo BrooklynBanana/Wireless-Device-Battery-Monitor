@@ -567,6 +567,14 @@ void Observe(const std::wstring& key, int percent, bool charging) {
     }
 }
 
+std::wstring RemainingText(const std::wstring& key) {
+    if (key.empty()) return L"";
+    const int64_t now = UtcNow();
+    const auto points = g_demo ? DemoSamples(now) : g_store.For(key, now - kRetentionSeconds, now);
+    const RuntimeEstimate forecast = EstimateRuntime(points, now);
+    return forecast.state == RuntimeState::Ready ? FormatRemaining(forecast.hoursRemaining) : L"";
+}
+
 void Show(HWND owner, const std::wstring& key, const std::wstring& displayName) {
     if (key.empty()) return;
     g_key = key;

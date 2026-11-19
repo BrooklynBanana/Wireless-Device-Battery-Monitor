@@ -6,10 +6,11 @@
 #include <uiautomation.h>
 #include <algorithm>
 #include <climits>
+#include <cmath>
 
 namespace {
 
-HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
+HWND g_wnd, g_taskbar, g_notify, g_rebar;
 UINT g_clickMsg;
 bool g_light, g_hover;
 bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
@@ -31,6 +32,7 @@ struct Mirror {
     SIZE size{};
     int dpi = 0;
     int lastLeft = INT_MIN;  // client x it was last placed at; INT_MIN = not placed (hidden)
+    std::vector<RECT> itemRects;  // each device's area in this strip (for the hover card)
 };
 std::vector<Mirror> g_mirrors;
 // Which taskbars show the strip: "all", "main", or one monitor's id (MonitorId), e.g. only monitor 3.
@@ -232,17 +234,6 @@ RECT WidgetsButtonRect() {
     return r;
 }
 
-void ApplyTipTheme() {
-    if (!g_tip) return;
-    using SetWindowThemeFn = HRESULT(WINAPI*)(HWND, LPCWSTR, LPCWSTR);
-    static HMODULE ux = LoadLibraryExW(L"uxtheme.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
-    static auto setTheme = ux ? (SetWindowThemeFn)GetProcAddress(ux, "SetWindowTheme") : nullptr;
-    if (setTheme) {
-        setTheme(g_tip, g_light ? L"Explorer" : L"DarkMode_Explorer", nullptr);
-        SendMessageW(g_tip, WM_THEMECHANGED, 0, 0);
-    }
-}
-
 wchar_t Glyph(DeviceKind k, bool bluetooth) {
     switch (k) {
         case DeviceKind::Headset:  return 0xE7F6;  // Headphone
@@ -389,6 +380,7 @@ struct Piece {
     Mask halo;        // glow drawn behind the glyph (branded devices)
     int haloR = 0, haloAlpha = 0;
     int px = INT_MIN, py = 0;  // fixed top-left position (stacked and vertical layouts); INT_MIN = flow left to right
+    int item = -1;    // index in g_items of the device this piece belongs to (finds the device under the mouse)
 };
 
 // Three arrangements of the same pieces:
@@ -444,6 +436,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
             c.by = out[glyph].m.h - c.m.h + Px(3);
             out.push_back(c);
         }
+        for (size_t k = glyph; k < out.size(); k++) out[k].item = (int)i;
     }
     DeleteObject(icons);
     DeleteObject(bolt);
@@ -508,8 +501,12 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     return out;
 }
 
+// Each device's area in a strip (client coordinates), from the last paint: the primary strip's, and each
+// mirror keeps its own. Neighbouring areas meet halfway between devices, so there is no dead gap.
+std::vector<RECT> g_itemRects;
+
 // Draws the strip for one window: the primary one or a mirror on a secondary taskbar.
-void PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
+void PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size, std::vector<RECT>& itemRects) {
     RECT bar;
     GetClientRect(taskbar, &bar);
     int W = 0, H = 0;
@@ -566,6 +563,39 @@ void PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
         cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha);
     }
 
+    // Where each device sits, for the hover card: the span of its pieces, widened to meet its neighbours.
+    itemRects.assign(g_items.size(), RECT{ INT_MAX, INT_MAX, INT_MIN, INT_MIN });
+    for (size_t i = 0; i < pieces.size(); i++) {
+        int k = pieces[i].item;
+        if (k < 0 || k >= (int)itemRects.size()) continue;
+        RECT& r = itemRects[k];
+        r.left = std::min(r.left, (LONG)xs[i]);
+        r.top = std::min(r.top, (LONG)ys[i]);
+        r.right = std::max(r.right, (LONG)(xs[i] + pieces[i].m.w));
+        r.bottom = std::max(r.bottom, (LONG)(ys[i] + pieces[i].m.h));
+    }
+    for (size_t k = 0; k < itemRects.size(); k++) {
+        RECT& r = itemRects[k];
+        if (r.left > r.right) { r = RECT{}; continue; }
+        if (g_vertical) {  // devices one under the other: full width, split the height
+            r.left = 0;
+            r.right = W;
+            r.top = k == 0 ? 0 : (itemRects[k - 1].bottom + r.top) / 2;
+        } else {
+            r.top = 0;
+            r.bottom = H;
+            r.left = k == 0 ? 0 : (itemRects[k - 1].right + r.left) / 2;
+        }
+    }
+    for (size_t k = 0; k + 1 < itemRects.size(); k++) {
+        if (g_vertical) itemRects[k].bottom = itemRects[k + 1].top;
+        else itemRects[k].right = itemRects[k + 1].left;
+    }
+    if (!itemRects.empty()) {
+        if (g_vertical) itemRects.back().bottom = H;
+        else itemRects.back().right = W;
+    }
+
     HDC screen = GetDC(nullptr);
     HDC mem = CreateCompatibleDC(screen);
     BITMAPINFO bi{};
@@ -587,14 +617,14 @@ void PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
 
 void Paint() {
     if (!g_wnd) return;
-    PaintStrip(g_wnd, g_taskbar, g_hover, g_size);
+    PaintStrip(g_wnd, g_taskbar, g_hover, g_size, g_itemRects);
     g_lastW = -1;  // force a re-position with the new size
 }
 
 void PaintMirror(Mirror& m) {
     g_dpiBar = m.bar;
     m.dpi = Dpi();
-    PaintStrip(m.wnd, m.bar, m.hover, m.size);
+    PaintStrip(m.wnd, m.bar, m.hover, m.size, m.itemRects);
     g_dpiBar = nullptr;
     m.lastLeft = INT_MIN;  // force a re-position with the new size
 }
@@ -663,23 +693,10 @@ void PositionMirror(Mirror& m) {
     SetWindowPos(m.wnd, HWND_TOP, p.x, 0, m.size.cx, m.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
-void AddTool(HWND w) {
-    if (!g_tip) return;
-    TTTOOLINFOW ti{ sizeof(ti) };
-    ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-    ti.hwnd = g_notify;
-    ti.uId = (UINT_PTR)w;
-    ti.lpszText = const_cast<wchar_t*>(g_tipText.empty() ? L"BatteryHub" : g_tipText.c_str());
-    SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
-}
+// The summary text is the strip's window name, so screen readers still read the levels.
+void SetSummary(HWND w) { SetWindowTextW(w, g_tipText.empty() ? L"BatteryHub" : g_tipText.c_str()); }
 
 void DestroyMirror(Mirror& m) {
-    if (g_tip) {
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.hwnd = g_notify;
-        ti.uId = (UINT_PTR)m.wnd;
-        SendMessageW(g_tip, TTM_DELTOOLW, 0, (LPARAM)&ti);
-    }
     if (m.wnd && IsWindow(m.wnd)) DestroyWindow(m.wnd);
     m.wnd = nullptr;
 }
@@ -779,7 +796,7 @@ void SyncMirrors() {
         m.wnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE, kClass, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, b, nullptr,
                                 g_inst, nullptr);
         if (!m.wnd) continue;
-        AddTool(m.wnd);
+        SetSummary(m.wnd);
         g_mirrors.push_back(m);
         PaintMirror(g_mirrors.back());
     }
@@ -790,6 +807,259 @@ void SyncMirrors() {
 void PaintAll() {
     Paint();
     for (auto& m : g_mirrors) PaintMirror(m);
+}
+
+// ---- hover card ----------------------------------------------------------------------------------
+// Resting the mouse on a device opens a small card above it, in the style of the Windows 11 flyouts: the
+// device's icon and name, its level in large type with a coloured bar, then a few lines (charging / asleep,
+// estimated time to empty, connection). It replaces the plain tooltip, follows the light / dark theme and
+// the taskbar's DPI, and lets the mouse through (it never takes focus or clicks).
+HWND g_card;
+int g_cardItem = -1;   // device shown in the card; -1 = hidden, kCardMessage = the "no devices" text
+HWND g_cardStrip;      // strip the card was opened from (primary or a mirror)
+int g_hoverItem = -1;  // device under the mouse
+constexpr int kCardMessage = -2;
+constexpr UINT_PTR kCardTimer = 1;
+constexpr UINT kCardDelayMs = 400;
+const wchar_t* kCardClass = L"WirelessBatteryCard";
+
+const std::vector<RECT>* RectsOf(HWND strip) {
+    if (strip == g_wnd) return &g_itemRects;
+    for (auto& m : g_mirrors)
+        if (m.wnd == strip) return &m.itemRects;
+    return nullptr;
+}
+
+int ItemAt(HWND strip, POINT p) {
+    if (g_items.empty()) return kCardMessage;
+    const auto* rects = RectsOf(strip);
+    if (!rects) return -1;
+    for (size_t i = 0; i < rects->size(); i++)
+        if (PtInRect(&(*rects)[i], p)) return (int)i;
+    return -1;
+}
+
+// A line of text at its full cell height (RenderMask crops to the ink), so lines line up on a baseline.
+Mask RenderLine(const std::wstring& s, HFONT font) {
+    Mask m;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, font);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
+    if (sz.cx > 0 && sz.cy > 0) {
+        int W = sz.cx + 2, H = sz.cy;
+        BITMAPINFO bi{};
+        bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ ob = SelectObject(dc, bmp);
+        memset(bits, 0, (size_t)W * H * 4);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutW(dc, 0, 0, s.c_str(), (int)s.size());
+        GdiFlush();
+        auto* p = static_cast<DWORD*>(bits);
+        m.w = W;
+        m.h = H;
+        m.a.resize((size_t)W * H);
+        for (int i = 0; i < W * H; i++) m.a[i] = (BYTE)(((p[i] & 0xFF) + ((p[i] >> 8) & 0xFF) + ((p[i] >> 16) & 0xFF)) / 3);
+        SelectObject(dc, ob);
+        DeleteObject(bmp);
+    }
+    SelectObject(dc, of);
+    DeleteDC(dc);
+    return m;
+}
+
+// Shortens `s` with an ellipsis until it fits in `maxW` pixels.
+std::wstring Fit(std::wstring s, HFONT font, int maxW) {
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, font);
+    auto width = [&](const std::wstring& t) { SIZE z{}; GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &z); return (int)z.cx; };
+    if (width(s) > maxW) {
+        while (s.size() > 1 && width(s + L"…") > maxW) s.pop_back();
+        s += L"…";
+    }
+    SelectObject(dc, of);
+    DeleteDC(dc);
+    return s;
+}
+
+// Rounded rectangle with anti-aliased corners.
+void FillRound(Canvas& cv, int x0, int y0, int w, int h, int r, Rgb c, int alpha) {
+    for (int y = y0; y < y0 + h; y++)
+        for (int x = x0; x < x0 + w; x++) {
+            double dx = x < x0 + r ? x0 + r - (x + 0.5) : (x >= x0 + w - r ? (x + 0.5) - (x0 + w - r) : 0);
+            double dy = y < y0 + r ? y0 + r - (y + 0.5) : (y >= y0 + h - r ? (y + 0.5) - (y0 + h - r) : 0);
+            double cover = (dx > 0 && dy > 0) ? std::min(1.0, std::max(0.0, r - std::sqrt(dx * dx + dy * dy) + 0.5)) : 1.0;
+            if (cover > 0) cv.Blend(x, y, c, (int)(alpha * cover));
+        }
+}
+
+void HideCard() {
+    g_cardItem = -1;
+    if (g_card) ShowWindow(g_card, SW_HIDE);
+}
+
+void ShowCard(HWND strip, int item) {
+    const auto* rects = RectsOf(strip);
+    bool message = item == kCardMessage;
+    if (!rects || (!message && (item < 0 || item >= (int)g_items.size() || item >= (int)rects->size()))) {
+        HideCard();
+        return;
+    }
+    if (!g_card) {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{ sizeof(wc) };
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = g_inst;
+            wc.lpszClassName = kCardClass;
+            registered = RegisterClassExW(&wc) != 0;
+        }
+        g_card = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, kCardClass, L"",
+                                 WS_POPUP, 0, 0, 1, 1, g_notify, nullptr, g_inst, nullptr);
+        if (!g_card) return;
+    }
+    HWND bar = GetParent(strip);
+    g_dpiBar = bar;  // Px() at the DPI of the monitor the strip is on
+
+    Rgb bg = g_light ? Rgb{ 249, 249, 249 } : Rgb{ 44, 44, 44 };
+    Rgb border = g_light ? Rgb{ 222, 222, 222 } : Rgb{ 66, 66, 66 };
+    Rgb fg = g_light ? Rgb{ 27, 27, 27 } : Rgb{ 242, 242, 242 };
+    Rgb sub = g_light ? Rgb{ 96, 96, 96 } : Rgb{ 170, 170, 170 };
+    Rgb track = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
+    Rgb red = g_light ? Rgb{ 196, 30, 40 } : Rgb{ 255, 90, 90 };
+    Rgb charge = g_light ? Rgb{ 0, 120, 212 } : Rgb{ 96, 205, 255 };
+    Rgb green = g_light ? Rgb{ 16, 124, 16 } : Rgb{ 108, 203, 95 };
+    HFONT icons = MakeFont(Px(18), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
+    HFONT title = MakeFont(Px(14), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");
+    HFONT big = MakeFont(Px(28), FW_SEMIBOLD, L"Segoe UI Variable Display", L"Segoe UI");
+    HFONT body = MakeFont(Px(12), FW_NORMAL, L"Segoe UI Variable Text", L"Segoe UI");
+
+    const int pad = Px(16), minW = Px(240), maxW = Px(380), textMax = maxW - 2 * pad;
+    struct Line { Mask m; Rgb c; int x, y; };
+    std::vector<Line> lines;
+    Mask glyph;
+    int W = minW, y = pad, barY = -1, pct = -1, barAlpha = 255;
+    Rgb barColor = fg;
+    if (message) {
+        size_t start = 0;
+        while (start <= g_tipText.size()) {
+            size_t end = g_tipText.find(L'\n', start);
+            std::wstring t = g_tipText.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            Mask m = RenderLine(Fit(t, body, textMax), body);
+            W = std::max(W, m.w + 2 * pad);
+            lines.push_back({ std::move(m), fg, pad, y });
+            y += lines.back().m.h + Px(2);
+            if (end == std::wstring::npos) break;
+            start = end + 1;
+        }
+        y += pad - Px(2);
+    } else {
+        const WidgetItem& it = g_items[item];
+        // icon + name
+        glyph = RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons, false);
+        int nameX = pad + glyph.w + Px(10);
+        Mask name = RenderLine(Fit(it.name, title, maxW - pad - nameX), title);
+        int rowH = std::max(glyph.h, name.h);
+        W = std::max(W, nameX + name.w + pad);
+        int nameY = y + (rowH - name.h) / 2;
+        lines.push_back({ std::move(name), fg, nameX, nameY });
+        int glyphY = y + (rowH - glyph.h) / 2;
+        y += rowH + Px(8);
+        // big level, with the state next to it
+        std::wstring level = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
+        Mask lv = RenderLine(level, big);
+        int lvY = y;
+        W = std::max(W, lv.w + 2 * pad);
+        Rgb levelColor = it.low ? red : fg;
+        lines.push_back({ std::move(lv), levelColor, pad, lvY });
+        y += lines.back().m.h + Px(4);
+        // level bar
+        pct = it.percent;
+        barAlpha = it.dim ? 150 : 255;  // asleep / last known value: same colours, a little faded
+        barColor = it.low ? red : it.charging ? charge : it.full ? green
+                 : it.accent != Accent::None ? Rgb{ AccentColor(it.accent, g_light).r, AccentColor(it.accent, g_light).g, AccentColor(it.accent, g_light).b }
+                 : green;
+        barY = y;
+        y += Px(6) + Px(12);
+        // status and extra lines
+        std::vector<std::wstring> rest;
+        if (!it.status.empty()) rest.push_back(it.status);
+        rest.insert(rest.end(), it.info.begin(), it.info.end());
+        for (const auto& t : rest) {
+            Mask m = RenderLine(Fit(t, body, textMax), body);
+            W = std::max(W, m.w + 2 * pad);
+            lines.push_back({ std::move(m), sub, pad, y });
+            y += lines.back().m.h + Px(2);
+        }
+        y += pad - Px(2);
+        // the icon goes first, drawn in the device's colour like the strip
+        lines.insert(lines.begin(), Line{ std::move(glyph), it.accent != Accent::None
+                                              ? Rgb{ AccentColor(it.accent, g_light).r, AccentColor(it.accent, g_light).g, AccentColor(it.accent, g_light).b }
+                                              : fg, pad, glyphY });
+    }
+    W = std::min(W, maxW);
+    int H = y;
+    DeleteObject(icons);
+    DeleteObject(title);
+    DeleteObject(big);
+    DeleteObject(body);
+
+    Canvas cv(W, H);
+    int radius = Px(8);
+    FillRound(cv, 0, 0, W, H, radius, border, 255);
+    FillRound(cv, 1, 1, W - 2, H - 2, std::max(1, radius - 1), bg, 255);
+    if (barY >= 0) {
+        int bw = W - 2 * pad, bh = Px(6);
+        FillRound(cv, pad, barY, bw, bh, bh / 2, track, g_light ? 28 : 40);
+        if (pct > 0) FillRound(cv, pad, barY, std::max(bh, bw * std::min(pct, 100) / 100), bh, bh / 2, barColor, barAlpha);
+    }
+    for (const auto& l : lines) cv.Draw(l.m, l.x, l.y, l.c, 255);
+
+    // Above the device (below it for a top taskbar, beside it for a left / right one), kept on its monitor.
+    RECT ir{};
+    if (message) GetClientRect(strip, &ir);
+    else ir = (*rects)[item];
+    MapWindowPoints(strip, nullptr, reinterpret_cast<POINT*>(&ir), 2);
+    RECT br{};
+    GetWindowRect(bar, &br);
+    MONITORINFO mi{ sizeof(mi) };
+    GetMonitorInfoW(MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST), &mi);
+    const RECT& mon = mi.rcMonitor;
+    int gap = Px(8), x, top;
+    bool vertical = br.bottom - br.top > br.right - br.left;
+    if (vertical) {
+        top = (ir.top + ir.bottom) / 2 - H / 2;
+        x = br.left - mon.left < mon.right - br.right ? br.right + gap : br.left - gap - W;
+    } else {
+        x = (ir.left + ir.right) / 2 - W / 2;
+        top = br.top - mon.top > mon.bottom - br.bottom ? br.top - gap - H : br.bottom + gap;
+    }
+    x = std::max((int)mon.left + gap, std::min(x, (int)mon.right - gap - W));
+    top = std::max((int)mon.top + gap, std::min(top, (int)mon.bottom - gap - H));
+    g_dpiBar = nullptr;
+
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    memcpy(bits, cv.px.data(), (size_t)W * H * 4);
+    HGDIOBJ ob = SelectObject(mem, bmp);
+    SIZE sz{ W, H };
+    POINT src{ 0, 0 }, dst{ x, top };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_card, screen, &dst, &sz, mem, &src, 0, &bf, ULW_ALPHA);
+    SelectObject(mem, ob);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    SetWindowPos(g_card, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    g_cardItem = item;
+    g_cardStrip = strip;
 }
 
 // Hover highlight for the strip under the mouse: the primary one or a mirror.
@@ -815,13 +1085,36 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
             TrackMouseEvent(&t);
             SetHover(h, true);
+            POINT p{ (short)LOWORD(lp), (short)HIWORD(lp) };
+            int k = ItemAt(h, p);
+            if (k != g_hoverItem || h != g_cardStrip) {
+                g_hoverItem = k;
+                if (g_cardItem != -1 && k != -1) {
+                    ShowCard(h, k);  // already open: follow the mouse to the next device right away
+                } else {
+                    KillTimer(h, kCardTimer);
+                    if (k == -1) HideCard();
+                    else SetTimer(h, kCardTimer, kCardDelayMs, nullptr);
+                }
+            }
             return 0;
         }
+        case WM_TIMER:
+            if (wp == kCardTimer) {
+                KillTimer(h, kCardTimer);
+                if (g_hoverItem != -1) ShowCard(h, g_hoverItem);
+            }
+            return 0;
         case WM_MOUSELEAVE:
             SetHover(h, false);
+            KillTimer(h, kCardTimer);
+            g_hoverItem = -1;
+            HideCard();
             return 0;
         case WM_LBUTTONUP:
         case WM_RBUTTONUP:
+            KillTimer(h, kCardTimer);
+            HideCard();
             PostMessageW(g_notify, g_clickMsg, 0, 0);
             return 0;
         case WM_MOUSEACTIVATE:
@@ -864,20 +1157,7 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
                             g_taskbar, nullptr, inst, nullptr);
     if (!g_wnd) { g_taskbar = nullptr; return false; }
 
-    INITCOMMONCONTROLSEX icc{ sizeof(icc), ICC_WIN95_CLASSES };
-    InitCommonControlsEx(&icc);
-    g_tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX, 0, 0, 0, 0,
-                            notifyWnd, nullptr, inst, nullptr);
-    if (g_tip) {
-        ApplyTipTheme();
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-        ti.hwnd = notifyWnd;
-        ti.uId = (UINT_PTR)g_wnd;
-        ti.lpszText = const_cast<wchar_t*>(L"BatteryHub");
-        SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
-        SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
-    }
+    SetSummary(g_wnd);
     WatchWidgetsButton(g_taskbar);
     g_lastDpi = Dpi();
     Paint();
@@ -900,7 +1180,9 @@ void Destroy() {
     SetMeasureMirrors(false);
     g_primaryHidden = false;  // the next Create() decides again
     if (g_wbWake) WatchWidgetsButton(nullptr);
-    if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
+    if (g_card) { DestroyWindow(g_card); g_card = nullptr; }
+    g_cardItem = g_hoverItem = -1;
+    g_cardStrip = nullptr;
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
     g_taskbar = nullptr;
     g_hover = false;
@@ -910,26 +1192,23 @@ bool Alive() { return g_wnd && IsWindow(g_wnd) && g_taskbar && IsWindow(g_taskba
 
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip) {
     g_items = items;
-    if (tooltip != g_tipText && g_tip) {
+    if (tooltip != g_tipText) {
         g_tipText = tooltip;
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.hwnd = g_notify;
-        ti.lpszText = const_cast<wchar_t*>(g_tipText.c_str());
-        ti.uId = (UINT_PTR)g_wnd;
-        SendMessageW(g_tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
-        for (const auto& m : g_mirrors) {
-            ti.uId = (UINT_PTR)m.wnd;
-            SendMessageW(g_tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
-        }
+        if (g_wnd) SetSummary(g_wnd);
+        for (const auto& m : g_mirrors) SetSummary(m.wnd);
     }
     PaintAll();
     Reposition();
+    if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) {  // keep an open card up to date
+        if (g_cardItem == kCardMessage ? g_items.empty() : g_cardItem < (int)g_items.size()) ShowCard(g_cardStrip, g_cardItem);
+        else HideCard();
+    }
 }
 
 void SetLightTheme(bool light) {
     g_light = light;
-    ApplyTipTheme();
     PaintAll();
+    if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) ShowCard(g_cardStrip, g_cardItem);
 }
 
 void SetBackground(bool on) {

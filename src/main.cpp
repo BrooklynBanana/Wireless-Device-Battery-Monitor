@@ -10,6 +10,7 @@
 #include <climits>
 #include <cstdio>
 #include <cwchar>
+#include <cwctype>
 #include <map>
 #include <set>
 #include <string>
@@ -596,6 +597,24 @@ void UpdateWidget() {
         it.bluetooth = e->st.via == L"Bluetooth";
         it.label = labels[items.size()];
         it.accent = AccentFor(e->st);
+        it.name = DisplayName(*e);
+        {   // the card shows the level in large type already: here only the state, e.g. "Charging", "Asleep"
+            std::vector<std::wstring> parts;
+            if (offline) parts.push_back(T(L"off / not connected"));
+            else {
+                if (!e->st.detail.empty() && e->st.percent >= 0) parts.push_back(e->st.detail);
+                if (it.full) parts.push_back(T(L"fully charged"));
+                else if (it.charging) parts.push_back(T(L"charging"));
+                if (e->st.asleep) parts.push_back(T(L"asleep"));
+            }
+            for (const auto& p : parts) it.status += (it.status.empty() ? L"" : L", ") + p;
+            if (!it.status.empty()) it.status[0] = towupper(it.status[0]);
+        }
+        if (!offline && !e->st.charging) {
+            std::wstring left = battery_history::RemainingText(e->st.key);
+            if (!left.empty()) it.info.push_back(std::wstring(T(L"Estimated time to empty")) + L": " + left);
+        }
+        if (!e->st.via.empty() && e->st.via != L"demo") it.info.push_back(T(e->st.via));
         items.push_back(it);
         if (!tip.empty()) tip += L"\n";
         tip += DisplayName(*e) + L": " + StatusText(*e);

@@ -19,6 +19,10 @@ struct WidgetItem {
     bool bluetooth = false;  // picks the Bluetooth icon when the device type is unknown
     std::wstring label;      // tiny caption on the icon; set only when two devices of one kind are shown
     Accent accent  = Accent::None;  // brand color for the icon, its glow and the level bar
+    // Shown in the card that opens when the mouse rests on this device in the strip.
+    std::wstring name;               // display name (custom name when renamed)
+    std::wstring status;             // "49%, charging", "asleep" ...
+    std::vector<std::wstring> info;  // extra lines: estimated time to empty, connection
 };
 
 namespace widget {
