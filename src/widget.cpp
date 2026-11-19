@@ -1074,7 +1074,7 @@ void ShowCard(HWND strip, int item) {
         // Time runs left to right: the last 24 hours, "now", then (when there is an estimate) the forecast down
         // to 0%. The past takes 45% of the width when a forecast is shown, so "now" never gets squeezed.
         const int cx = pad, cw = W - 2 * pad, ch = Px(56);
-        const double past = 24.0 * 3600.0, maxFuture = 7.0 * 24 * 3600.0;
+        const double past = 24.0 * 3600.0, maxFuture = 90.0 * 24 * 3600.0;  // the forecast side has its own width
         const double future = forecastHours > 0 ? std::min(forecastHours * 3600.0, maxFuture) : 0;
         const double pastW = future > 0 ? (cw - 1) * 0.45 : (cw - 1);
         auto X = [&](double t) {  // t: seconds from now (negative = past)
@@ -1120,7 +1120,7 @@ void ShowCard(HWND strip, int item) {
             if (pts[i + 1].first - pts[i].first > 12 * 3600) { disc(X(pts[i].first), Y(pts[i].second), 1, 200); continue; }
             line(X(pts[i].first), Y(pts[i].second), X(pts[i + 1].first), Y(pts[i + 1].second), 110, false, false);
         }
-        // the forecast: a dashed line from now down to empty (or to where it gets after 7 days)
+        // the forecast: a dashed line from now down to empty
         if (future > 0) {
             double endPct = chartNow * (1.0 - future / (forecastHours * 3600.0));
             line(X(0), Y(chartNow), X(future), Y(endPct), 90, true, false);
