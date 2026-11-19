@@ -567,12 +567,17 @@ void Observe(const std::wstring& key, int percent, bool charging) {
     }
 }
 
-std::wstring RemainingText(const std::wstring& key) {
-    if (key.empty()) return L"";
+double HoursRemaining(const std::wstring& key) {
+    if (key.empty()) return -1;
     const int64_t now = UtcNow();
     const auto points = g_demo ? DemoSamples(now) : g_store.For(key, now - kRetentionSeconds, now);
     const RuntimeEstimate forecast = EstimateRuntime(points, now);
-    return forecast.state == RuntimeState::Ready ? FormatRemaining(forecast.hoursRemaining) : L"";
+    return forecast.state == RuntimeState::Ready ? forecast.hoursRemaining : -1;
+}
+
+std::wstring RemainingText(const std::wstring& key) {
+    const double hours = HoursRemaining(key);
+    return hours >= 0 ? FormatRemaining(hours) : L"";
 }
 
 std::vector<Point> Recent(const std::wstring& key, int hours) {

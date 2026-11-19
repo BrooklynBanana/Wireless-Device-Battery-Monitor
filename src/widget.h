@@ -25,6 +25,8 @@ struct WidgetItem {
     std::vector<std::wstring> info;  // extra lines: estimated time to empty, connection
     // Recorded levels of the last 24 hours for the card's small chart: {seconds ago (<= 0), percent}.
     std::vector<std::pair<long long, int>> trend;
+    double hoursLeft = -1;      // estimated time to empty (the chart's dashed forecast), -1 = none
+    std::wstring hoursLeftText; // the same, formatted ("~3 d 4 h")
 };
 
 namespace widget {

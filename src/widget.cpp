@@ -975,8 +975,10 @@ void ShowCard(HWND strip, int item) {
     struct Line { Mask m; Rgb c; int x, y; };
     std::vector<Line> lines;
     Mask glyph;
-    int W = minW, y = pad, barY = -1, pct = -1, barAlpha = 255, chartY = -1;
+    int W = minW, y = pad, barY = -1, pct = -1, barAlpha = 255, chartY = -1, chartNow = -1, axisY = 0;
+    double forecastHours = -1;
     std::vector<std::pair<long long, int>> chart;
+    Mask axisLeft, axisNow, axisEnd;
     Rgb barColor = fg;
     if (message) {
         size_t start = 0;
@@ -1029,15 +1031,22 @@ void ShowCard(HWND strip, int item) {
             lines.push_back({ std::move(m), sub, pad, y });
             y += lines.back().m.h + Px(2);
         }
-        // small chart of the last 24 hours (recorded readings only, like the history window)
-        if (g_chartOn && it.trend.size() >= 2) {
+        // chart: the recorded levels of the last 24 hours, then the forecast down to empty (dashed)
+        forecastHours = it.percent > 0 ? it.hoursLeft : -1;
+        if (g_chartOn && it.percent >= 0 && (!it.trend.empty() || forecastHours > 0)) {
             y += Px(8);
-            Mask cap = RenderLine(T(L"Last 24 hours"), body);
+            Mask cap = RenderLine(T(forecastHours > 0 ? L"Last 24 hours and forecast" : L"Last 24 hours"), body);
             lines.push_back({ std::move(cap), sub, pad, y });
-            y += lines.back().m.h + Px(4);
+            y += lines.back().m.h + Px(6);
             chartY = y;
             chart = it.trend;
-            y += Px(44);
+            chartNow = it.percent;
+            y += Px(56) + Px(4);
+            axisLeft = RenderLine(T(L"24h ago"), body);
+            axisNow = RenderLine(T(L"Now"), body);
+            if (forecastHours > 0) axisEnd = RenderLine(it.hoursLeftText, body);
+            axisY = y;
+            y += axisLeft.h;
         }
         y += pad - Px(2);
         // the icon goes first, drawn in the device's colour like the strip
@@ -1062,15 +1071,21 @@ void ShowCard(HWND strip, int item) {
         if (pct > 0) FillRound(cv, pad, barY, std::max(bh, bw * std::min(pct, 100) / 100), bh, bh / 2, barColor, barAlpha);
     }
     if (chartY >= 0) {
-        // x: 24 hours ago .. now; y: 0 .. 100%. Readings more than 3 hours apart are not joined (a gap stays a gap).
-        const int cx = pad, cw = W - 2 * pad, ch = Px(44);
-        const double span = 24.0 * 3600.0;
-        auto X = [&](long long ago) { return cx + (span + (double)ago) / span * (cw - 1); };
-        auto Y = [&](int p) { return chartY + (100 - std::max(0, std::min(p, 100))) / 100.0 * (ch - 1); };
+        // Time runs left to right: the last 24 hours, "now", then (when there is an estimate) the forecast down
+        // to 0%. The past takes 45% of the width when a forecast is shown, so "now" never gets squeezed.
+        const int cx = pad, cw = W - 2 * pad, ch = Px(56);
+        const double past = 24.0 * 3600.0, maxFuture = 7.0 * 24 * 3600.0;
+        const double future = forecastHours > 0 ? std::min(forecastHours * 3600.0, maxFuture) : 0;
+        const double pastW = future > 0 ? (cw - 1) * 0.45 : (cw - 1);
+        auto X = [&](double t) {  // t: seconds from now (negative = past)
+            return t <= 0 ? cx + (1.0 + std::max(t, -past) / past) * pastW : cx + pastW + std::min(t, future) / future * ((cw - 1) - pastW);
+        };
+        auto Y = [&](double p) { return chartY + (100.0 - std::max(0.0, std::min(p, 100.0))) / 100.0 * (ch - 1); };
         for (int yy : { chartY, chartY + ch / 2, chartY + ch - 1 })  // faint 100% / 50% / 0% guides
             for (int xx = cx; xx < cx + cw; xx++) cv.Blend(xx, yy, track, g_light ? 18 : 24);
-        // soft dot used to draw an anti-aliased line two pixels wide
-        auto dot = [&](double fx, double fy, int alpha) {
+        const int nowX = (int)std::lround(X(0));
+        for (int yy = chartY; yy < chartY + ch; yy += 3) cv.Blend(nowX, yy, track, g_light ? 50 : 70);  // "now"
+        auto dot = [&](double fx, double fy, int alpha) {  // anti-aliased point, for 2 px lines
             int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
             double ax = fx - x0, ay = fy - y0;
             cv.Blend(x0, y0, barColor, (int)(alpha * (1 - ax) * (1 - ay)));
@@ -1078,27 +1093,48 @@ void ShowCard(HWND strip, int item) {
             cv.Blend(x0, y0 + 1, barColor, (int)(alpha * (1 - ax) * ay));
             cv.Blend(x0 + 1, y0 + 1, barColor, (int)(alpha * ax * ay));
         };
-        for (size_t i = 0; i + 1 < chart.size(); i++) {
-            const auto& a = chart[i];
-            const auto& b = chart[i + 1];
-            if (b.first - a.first > 3 * 3600) continue;
-            double x1 = X(a.first), y1 = Y(a.second), x2 = X(b.first), y2 = Y(b.second);
-            for (int xx = (int)std::ceil(x1); xx <= (int)std::floor(x2); xx++) {  // light area under the line
-                double t = x2 > x1 ? (xx - x1) / (x2 - x1) : 0;
-                for (int yy = (int)std::ceil(y1 + (y2 - y1) * t); yy < chartY + ch; yy++) cv.Blend(xx, yy, barColor, g_light ? 34 : 44);
-            }
+        auto line = [&](double x1, double y1, double x2, double y2, int alpha, bool dashed, bool area) {
+            if (area)
+                for (int xx = (int)std::ceil(x1); xx <= (int)std::floor(x2); xx++) {
+                    double k = x2 > x1 ? (xx - x1) / (x2 - x1) : 0;
+                    for (int yy = (int)std::ceil(y1 + (y2 - y1) * k); yy < chartY + ch; yy++) cv.Blend(xx, yy, barColor, g_light ? 30 : 40);
+                }
             double len = std::max(1.0, std::hypot(x2 - x1, y2 - y1));
             for (double s = 0; s <= len; s += 0.25) {
+                if (dashed && std::fmod(s, (double)Px(7)) > Px(4)) continue;
                 double fx = x1 + (x2 - x1) * s / len, fy = y1 + (y2 - y1) * s / len;
-                dot(fx, fy - 0.5, 90);
-                dot(fx, fy + 0.5, 90);
+                dot(fx, fy - 0.5, alpha);
+                dot(fx, fy + 0.5, alpha);
             }
+        };
+        auto disc = [&](double fx, double fy, int r, int alpha) {
+            for (int yy = -r; yy <= r; yy++)
+                for (int xx = -r; xx <= r; xx++)
+                    if (xx * xx + yy * yy <= r * r + 1) cv.Blend((int)std::lround(fx) + xx, (int)std::lround(fy) + yy, barColor, alpha);
+        };
+        // the past: recorded readings joined when less than 6 hours apart (longer gaps stay gaps), up to now
+        std::vector<std::pair<double, double>> pts;
+        for (const auto& c : chart) pts.push_back({ (double)c.first, (double)c.second });
+        pts.push_back({ 0.0, (double)chartNow });
+        for (size_t i = 0; i + 1 < pts.size(); i++) {
+            if (pts[i + 1].first - pts[i].first > 6 * 3600) { disc(X(pts[i].first), Y(pts[i].second), 1, 200); continue; }
+            line(X(pts[i].first), Y(pts[i].second), X(pts[i + 1].first), Y(pts[i + 1].second), 110, false, true);
         }
-        const auto& last = chart.back();  // the latest reading as a dot
-        double lx = X(last.first), ly = Y(last.second);
-        for (int yy = -2; yy <= 2; yy++)
-            for (int xx = -2; xx <= 2; xx++)
-                if (xx * xx + yy * yy <= 5) cv.Blend((int)lx + xx, (int)ly + yy, barColor, 255);
+        // the forecast: a dashed line from now down to empty (or to where it gets after 7 days)
+        if (future > 0) {
+            double endPct = chartNow * (1.0 - future / (forecastHours * 3600.0));
+            line(X(0), Y(chartNow), X(future), Y(endPct), 90, true, false);
+            disc(X(future), Y(endPct), Px(2), 140);
+        }
+        disc(X(0), Y(chartNow), Px(2) + 1, 255);  // the current level
+        // axis labels: "24h ago" at the left, "Now" under the marker, the time to empty at the right
+        lines.push_back({ std::move(axisLeft), sub, cx, axisY });
+        int nowLabelX = std::max(cx, std::min(nowX - axisNow.w / 2, cx + cw - axisNow.w));
+        if (future > 0) nowLabelX = std::max(nowLabelX, cx + lines.back().m.w + Px(6));
+        int endX = cx + cw - axisEnd.w;
+        if (future > 0 && axisEnd.w > 0) nowLabelX = std::min(nowLabelX, endX - axisNow.w - Px(6));
+        if (future > 0 || nowX > cx + lines.back().m.w + Px(6)) lines.push_back({ std::move(axisNow), sub, nowLabelX, axisY });
+        if (future > 0 && axisEnd.w > 0) lines.push_back({ std::move(axisEnd), fg, endX, axisY });
     }
     for (const auto& l : lines) cv.Draw(l.m, l.x, l.y, l.c, 255);
 

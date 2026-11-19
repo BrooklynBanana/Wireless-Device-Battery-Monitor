@@ -613,8 +613,9 @@ void UpdateWidget() {
             if (!it.status.empty()) it.status[0] = towupper(it.status[0]);
         }
         if (!offline && !e->st.charging) {
-            std::wstring left = battery_history::RemainingText(e->st.key);
-            if (!left.empty()) it.info.push_back(std::wstring(T(L"Estimated time to empty")) + L": " + left);
+            it.hoursLeft = battery_history::HoursRemaining(e->st.key);
+            it.hoursLeftText = battery_history::RemainingText(e->st.key);
+            if (!it.hoursLeftText.empty()) it.info.push_back(std::wstring(T(L"Estimated time to empty")) + L": " + it.hoursLeftText);
         }
         if (!e->st.via.empty() && e->st.via != L"demo") it.info.push_back(T(e->st.via));
         if (g_hoverCard && g_hoverChart && g_recordHistory)
