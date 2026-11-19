@@ -172,6 +172,7 @@ void PollNothingEar(PollContext& ctx); // Nothing / CMF Ear earbuds (Bluetooth R
 void PollSonyHeadphones(PollContext& ctx); // Sony WH / WF headphones and earbuds (Bluetooth RFCOMM, not HID)
 void PollMarshall(PollContext& ctx);   // Marshall EMBERTON II speaker (unpaired LE Battery Service, address from Fast Pair stream)
 void PollAkko(PollContext& ctx);       // Akko V9 Dash Pro / Dash V9 Ultra receivers (38EE:000C/000F)
+void PollSoundcore(PollContext& ctx);  // Anker Soundcore Bluetooth headphones / earbuds (RFCOMM)
 void PollMoondrop(PollContext& ctx);   // MOONDROP GM01 Pro headset (WalkPlay 2.4 GHz dongle)
 void PollAlienware(PollContext& ctx);  // Alienware AW920H headset on its 2.4 GHz dongle (413C:A515)
 void PollPressPlayIcarus(PollContext& ctx);  // ICARUS V2 Nearlink on its 7768:6434 receiver
