@@ -1112,13 +1112,13 @@ void ShowCard(HWND strip, int item) {
                 for (int xx = -r; xx <= r; xx++)
                     if (xx * xx + yy * yy <= r * r + 1) cv.Blend((int)std::lround(fx) + xx, (int)std::lround(fy) + yy, barColor, alpha);
         };
-        // the past: recorded readings joined when less than 6 hours apart (longer gaps stay gaps), up to now
+        // the past: recorded readings joined when less than 12 hours apart (a mouse asleep overnight is not a gap), up to now
         std::vector<std::pair<double, double>> pts;
         for (const auto& c : chart) pts.push_back({ (double)c.first, (double)c.second });
         pts.push_back({ 0.0, (double)chartNow });
         for (size_t i = 0; i + 1 < pts.size(); i++) {
-            if (pts[i + 1].first - pts[i].first > 6 * 3600) { disc(X(pts[i].first), Y(pts[i].second), 1, 200); continue; }
-            line(X(pts[i].first), Y(pts[i].second), X(pts[i + 1].first), Y(pts[i + 1].second), 110, false, true);
+            if (pts[i + 1].first - pts[i].first > 12 * 3600) { disc(X(pts[i].first), Y(pts[i].second), 1, 200); continue; }
+            line(X(pts[i].first), Y(pts[i].second), X(pts[i + 1].first), Y(pts[i + 1].second), 110, false, false);
         }
         // the forecast: a dashed line from now down to empty (or to where it gets after 7 days)
         if (future > 0) {
