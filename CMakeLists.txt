@@ -20,6 +20,7 @@ include(WBVersion)
 if(WB_BUILD_LINUX AND NOT WIN32)
     add_subdirectory(src)
     add_subdirectory(src/linux)
+    include(WBInstall)
 endif()
 
 if(WB_BUILD_WINDOWS)
