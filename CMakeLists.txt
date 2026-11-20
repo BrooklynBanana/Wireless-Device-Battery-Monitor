@@ -31,3 +31,7 @@ if(WB_BUILD_TESTS)
     enable_testing()
     add_subdirectory(tests)
 endif()
+
+if(WB_BUILD_LINUX AND NOT WIN32)
+    include(WBPackaging)
+endif()
