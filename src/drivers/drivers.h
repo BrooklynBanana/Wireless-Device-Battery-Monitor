@@ -110,6 +110,7 @@ void PollNinjutso(PollContext& ctx);  // Sora V2 (1915:AE1C 1K receiver, AE11 ca
 void PollSprime(PollContext& ctx);    // Sprime PM1 (1915:AC1C / AD8C receivers, AC11-AC13 cable)
 void PollRawm(PollContext& ctx);      // RAWM mice (Leviathan V4, ES21, ...) and SADES Dagger (1915:23xx, RAWM HUB protocol)
 void PollRongyuan(PollContext& ctx);  // Rongyuan receivers (Attack Shark, Ajazz keyboards, ...)
+void PollVgnClient(PollContext& ctx);  // VGN / VXE mice and keyboards (2.4 GHz link only; runs after Kysona, AULA, ATK and Rongyuan, which claim parts of the same ids)
 
 void PollSonyInzone(PollContext& ctx);  // Sony INZONE H9 II / H5 / Buds (HID), H9 / H7 (serial port)
 void PollPlayStationLink(PollContext& ctx);  // PULSE Explore earbuds on the PlayStation Link adapter (054C:0ECC)
