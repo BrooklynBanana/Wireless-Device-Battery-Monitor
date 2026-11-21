@@ -122,6 +122,8 @@ test: test-update-core test-update-win test-update-signature
 	./build/aula_sc580_test.exe
 	$(CXX) $(CXXFLAGS) tests/hyperx_stinger_driver_test.cpp src/drivers/hyperx.cpp -o build/hyperx_stinger_driver_test.exe
 	./build/hyperx_stinger_driver_test.exe
+	$(CXX) $(CXXFLAGS) tests/rongyuan_driver_test.cpp src/drivers/rongyuan.cpp -o build/rongyuan_driver_test.exe
+	./build/rongyuan_driver_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/galaxy_buds_protocol_test.cpp -o build/galaxy_buds_protocol_test.exe
 	./build/galaxy_buds_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/sony_headphones_protocol_test.cpp -o build/sony_headphones_protocol_test.exe
