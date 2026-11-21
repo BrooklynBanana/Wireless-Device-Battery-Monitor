@@ -155,6 +155,13 @@ struct Span {
     int tasksRight = 0;      // right (bottom) edge of the last task button before the clock (screen x / y)
     bool hasFirst = false;
     int firstLeft = 0;       // left edge of the leftmost Start or task button (screen x), for the far-left spot
+    // Right-to-left taskbars (Arabic, Hebrew; from PR #2853): the clock sits at the left end, so the strip
+    // goes right of it. clockRight is the clock area's right edge, rtlTasksLeft the left edge of the
+    // nearest task button to its right (horizontal bars only).
+    bool rtl = false;
+    int clockRight = 0;
+    bool hasRtlTasks = false;
+    int rtlTasksLeft = 0;
 };
 
 bool IsVertical(const RECT& r) { return r.bottom - r.top > r.right - r.left; }
@@ -183,6 +190,7 @@ Span MeasureSpan(IUIAutomation* uia, HWND bar) {
     IUIAutomationElement* root = nullptr;
     if (!GetWindowRect(bar, &br) || FAILED(uia->ElementFromHandle(bar, &root)) || !root) return s;
     s.measured = true;
+    s.rtl = (GetWindowLongW(bar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) != 0;
     bool v = IsVertical(br);
     auto inBar = [&](const RECT& r) {
         return Hi(r, v) > Lo(r, v) && Lo(r, v) >= Lo(br, v) && Hi(r, v) <= Hi(br, v);
@@ -194,9 +202,9 @@ Span MeasureSpan(IUIAutomation* uia, HWND bar) {
             for (int i = 0; i < n; i++) {  // leftmost of the clock area's buttons
                 IUIAutomationElement* el = nullptr;
                 RECT r{};
-                if (SUCCEEDED(all->GetElement(i, &el)) && el && SUCCEEDED(el->get_CurrentBoundingRectangle(&r)) && inBar(r) &&
-                    (!s.hasClock || Lo(r, v) < s.clockLeft)) {
-                    s.clockLeft = Lo(r, v);
+                if (SUCCEEDED(all->GetElement(i, &el)) && el && SUCCEEDED(el->get_CurrentBoundingRectangle(&r)) && inBar(r)) {
+                    if (!s.hasClock || Lo(r, v) < s.clockLeft) s.clockLeft = Lo(r, v);
+                    if (!s.hasClock || r.right > s.clockRight) s.clockRight = r.right;
                     s.hasClock = true;
                 }
                 if (el) el->Release();
@@ -231,6 +239,11 @@ Span MeasureSpan(IUIAutomation* uia, HWND bar) {
                         (!s.hasTasks || Hi(r, v) > s.tasksRight)) {
                         s.tasksRight = Hi(r, v);
                         s.hasTasks = true;
+                    }
+                    if (s.rtl && !v && (!s.hasClock || r.left >= s.clockRight) &&
+                        (!s.hasWidgets || r.left >= s.widgets.right) && (!s.hasRtlTasks || r.left < s.rtlTasksLeft)) {
+                        s.rtlTasksLeft = r.left;
+                        s.hasRtlTasks = true;
                     }
                 }
                 if (el) el->Release();
@@ -910,8 +923,10 @@ bool Shown(HWND w) { return (GetWindowLongW(w, GWL_STYLE) & WS_VISIBLE) != 0; }
 // the clock, centred in the bar's width, like the primary strip does.
 void PositionMirror(Mirror& m) {
     RECT bar{};
-    if (!GetWindowRect(m.bar, &bar) || (GetWindowLongW(m.bar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL)) { HideMirror(m); return; }
+    if (!GetWindowRect(m.bar, &bar)) { HideMirror(m); return; }
     bool v = IsVertical(bar);
+    const bool rtl = (GetWindowLongW(m.bar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL) != 0;
+    if (rtl && v) { HideMirror(m); return; }  // a vertical right-to-left bar is not handled
     g_dpiBar = m.bar;
     // The strip's cross-bar size equals the bar's; a mismatch means the bar was resized or re-docked.
     if (!m.painted || Dpi() != m.dpi || m.size.cx <= 0 ||
@@ -927,6 +942,56 @@ void PositionMirror(Mirror& m) {
     int length = v ? m.size.cy : m.size.cx;  // the strip's size along the bar
     int right = 0, minLeft = Lo(bar, v);      // read "right"/"left" as "bottom"/"top" on a vertical bar
     bool known = false;
+    if (rtl) {
+        // Right-to-left (PR #2853): the notification area is at the left end; sit just right of it (or of the
+        // Widgets button there), and only while the task buttons leave room. Mirrors the left-to-right rules.
+        int edge = 0, limit = bar.right;
+        HWND rtray = FindWindowExW(m.bar, nullptr, L"TrayNotifyWnd", nullptr);
+        RECT rt{};
+        if (rtray && IsWindowVisible(rtray) && GetWindowRect(rtray, &rt) && rt.right > rt.left && rt.left >= bar.left &&
+            rt.right < bar.right && rt.bottom > bar.top && rt.top < bar.bottom) {
+            edge = rt.right;
+            known = true;
+        } else if (!IsXamlTaskbar(m.bar)) {
+            HWND clock = FindWindowExW(m.bar, nullptr, L"ClockButton", nullptr);
+            RECT cr{};
+            edge = clock && IsWindowVisible(clock) && GetWindowRect(clock, &cr) ? cr.right : bar.left + Px(8);
+            for (const wchar_t* cls : { L"ShellFeedsTaskbarViewWindow", L"DynamicContent2" }) {
+                HWND feeds = FindWindowExW(m.bar, nullptr, cls, nullptr);
+                RECT fr{};
+                if (feeds && IsWindowVisible(feeds) && GetWindowRect(feeds, &fr) && fr.right > edge && fr.right > fr.left)
+                    edge = fr.right;
+            }
+            known = true;
+        } else {
+            AcquireSRWLockShared(&g_wbLock);
+            for (const auto& s : g_spans)
+                if (s.bar == m.bar && s.measured && s.rtl) {
+                    edge = s.hasClock ? s.clockRight : bar.left + Px(8);
+                    if (s.hasWidgets && s.widgets.right > edge && s.widgets.left < edge + length + Px(2))
+                        edge = s.widgets.right;
+                    if (s.hasRtlTasks) limit = s.rtlTasksLeft - Px(4);
+                    known = true;
+                }
+            ReleaseSRWLockShared(&g_wbLock);
+        }
+        DWORD off = 0, osz = sizeof(off);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset", RRF_RT_REG_DWORD, nullptr, &off,
+                         &osz) == ERROR_SUCCESS)
+            edge += Px((int)off);
+        int left = edge + Px(2);
+        g_dpiBar = nullptr;
+        if (!known || length <= 0 || left + length > limit) { HideMirror(m); return; }
+        // In a WS_EX_LAYOUTRTL parent, client x runs from the right edge: convert the strip's screen RIGHT edge.
+        POINT p{ left + length, bar.top };
+        ScreenToClient(m.bar, &p);
+        int along = p.x;
+        bool covered = GetWindow(m.wnd, GW_HWNDPREV) != nullptr;
+        if (!covered && Shown(m.wnd) && along == m.lastLeft) return;
+        m.lastLeft = along;
+        SetWindowPos(m.wnd, HWND_TOP, p.x, 0, m.size.cx, m.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        return;
+    }
     // StartAllBack can put a full notification area on each secondary taskbar.
     // Use its left edge, as on the primary taskbar, to clear all of the tray icons.
     HWND tray = FindWindowExW(m.bar, nullptr, L"TrayNotifyWnd", nullptr);
