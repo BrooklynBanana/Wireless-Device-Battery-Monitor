@@ -384,6 +384,15 @@ void PollBluetooth(PollContext& ctx) {
             waited |= justStarted;
             if (got) ApplyFastPair(s, b);
         }
+        {
+            // Marshall Major IV announces itself as "MAJOR IV" (PR #3297): a proper name and a headset icon.
+            std::wstring n = s.name;
+            for (auto& ch : n) ch = (wchar_t)towlower(ch);
+            if (n == L"major iv" || n == L"marshall major iv" || n == L"major 4" || n == L"marshall major 4") {
+                s.name = L"Marshall Major IV";
+                s.kind = DeviceKind::Headset;
+            }
+        }
         ctx.out.push_back(s);
         ctx.btContainers.insert(cid);
     }

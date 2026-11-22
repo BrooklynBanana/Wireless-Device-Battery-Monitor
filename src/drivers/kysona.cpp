@@ -54,7 +54,11 @@ bool IsVxeR1(USHORT vid, USHORT pid) {
     return false;
 }
 
+// Attack Shark R11 Ultra (PR #3297): receiver 3554:FB44 and cable 3554:FB43, same protocol; one entry.
+bool IsR11Ultra(USHORT vid, USHORT pid) { return vid == 0x3554 && (pid == 0xFB43 || pid == 0xFB44); }
+
 std::pair<USHORT, USHORT> KeyIds(USHORT vid, USHORT pid) {
+    if (IsR11Ultra(vid, pid)) return { 0x3554, 0xFB44 };
     for (const auto& l : kR1Links)
         if ((vid == l.rxVid && pid == l.rxPid) || (vid == l.txVid && pid == l.txPid)) return { l.rxVid, l.rxPid };
     return { vid, pid };
@@ -77,7 +81,7 @@ bool IsCable(USHORT vid, USHORT pid) {
     // (pid lists in bbb.pulsar.gg/cMouse/cfg.json; 3510 = X2N CrazyLight verified).
     bool pulsar_cable = vid == 0x3710 && (pid >> 12) != 5;
     return (vid == 0x33E4 && GWolvesIsCable(pid)) || hecate_cable || pulsar_cable ||
-           (vid == 0x3554 && pid == 0xF55E) || IsVxeCable(vid, pid);
+           (vid == 0x3554 && (pid == 0xF55E || pid == 0xFB43)) || IsVxeCable(vid, pid);
 }
 
 BYTE Checksum(const BYTE* b) {
@@ -105,7 +109,8 @@ bool Query(HidDev& d, BYTE cmd, std::vector<BYTE>& r) {
 std::wstring CleanName(std::wstring n, USHORT vid, USHORT pid) {
     if (vid == 0x33E4) return GWolvesModelName(pid);
     if (IsRedragon(vid, pid)) return L"Redragon wireless mouse";  // shared by several models
-    if (IsVxeR1(vid, pid)) return L"VXE Dragonfly R1";  // the receivers call themselves "VXE NordicMouse 1K Dongle" etc.
+    if (IsVxeR1(vid, pid)) return L"VXE Dragonfly R1";
+    if (IsR11Ultra(vid, pid)) return L"Attack Shark R11 Ultra";  // the receivers call themselves "VXE NordicMouse 1K Dongle" etc.
     for (const wchar_t* suffix : { L" Dongle", L" Receiver", L" 2.4G", L" Wireless Receiver" }) {
         size_t l = wcslen(suffix);
         if (n.size() > l && n.compare(n.size() - l, l, suffix) == 0) n = n.substr(0, n.size() - l);
