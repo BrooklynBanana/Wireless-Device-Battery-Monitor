@@ -29,6 +29,12 @@ std::vector<WidgetItem> g_items;
 std::wstring g_tipText;
 RECT g_lastTray{}, g_lastBar{}, g_lastWidgets{};
 int g_lastW = -1, g_lastDpi = 0, g_lastLeft = -1;
+// Drag to move (PR #124): hold the left button on the strip and slide it along the taskbar. The drop
+// is saved as TaskbarOffset (DPI-independent px left of the tray), the value the menu also sets.
+int g_anchorLeft = -1;   // where the strip goes with no offset (taskbar client x), from the last Reposition
+bool g_pressed = false, g_dragging = false;
+POINT g_pressAt{};
+int g_grabDx = 0;
 SIZE g_size{};
 SIZE g_paintedBarClient{};
 bool g_painted = false;
@@ -1613,9 +1619,75 @@ void SetHover(HWND h, bool on) {
         }
 }
 
+// Only the main strip, next to the clock on a horizontal left-to-right taskbar: the other placements
+// (far left, before apps, vertical, RTL, other monitors) have no offset to save.
+bool CanDrag(HWND h) {
+    return h == g_wnd && !g_vertical && !g_farLeft && !g_beforeApps && g_anchorLeft >= 0 &&
+           !(GetWindowLongW(g_taskbar, GWL_EXSTYLE) & WS_EX_LAYOUTRTL);
+}
+
+void BeginDrag(HWND h) {
+    g_dragging = true;
+    KillTimer(h, kCardTimer);
+    g_hoverItem = -1;
+    HideCard();
+    RECT r;
+    GetWindowRect(h, &r);
+    POINT c;
+    GetCursorPos(&c);
+    g_grabDx = c.x - r.left;
+    SetCursor(LoadCursorW(nullptr, MAKEINTRESOURCEW(32644)));  // IDC_SIZEWE
+}
+
+void DragTo(HWND h, POINT c) {
+    RECT bar;
+    GetClientRect(g_taskbar, &bar);
+    POINT p{ c.x - g_grabDx, 0 };
+    ScreenToClient(g_taskbar, &p);
+    // Never right of the plain position: that is the tray.
+    int x = std::max(0, std::min((int)p.x, std::min(g_anchorLeft, (int)bar.right - (int)g_size.cx)));
+    SetWindowPos(h, HWND_TOP, x, 0, g_size.cx, g_size.cy, SWP_NOACTIVATE);
+}
+
+void Drop(HWND h) {
+    g_dragging = false;
+    RECT r;
+    GetWindowRect(h, &r);
+    POINT p{ r.left, r.top };
+    ScreenToClient(g_taskbar, &p);
+    int px = std::max(0, MulDiv(g_anchorLeft - (int)p.x, 96, Dpi()));
+    DWORD v = (DWORD)px;
+    if (px) RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset", REG_DWORD, &v, sizeof(v));
+    else RegDeleteKeyValueW(HKEY_CURRENT_USER, L"Software\\WirelessBattery", L"TaskbarOffset");
+    g_lastLeft = -1;  // settle on the saved offset
+    widget::Reposition();
+}
+
 LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     switch (msg) {
+        case WM_LBUTTONDOWN:
+            if (CanDrag(h)) {
+                g_pressed = true;
+                GetCursorPos(&g_pressAt);
+                SetCapture(h);
+            }
+            return 0;
+        case WM_CAPTURECHANGED:
+            if (g_dragging && (HWND)lp != h) Drop(h);  // capture taken away (Esc, another window): keep where it is
+            g_pressed = false;
+            return 0;
         case WM_MOUSEMOVE: {
+            if (g_pressed) {
+                POINT c;
+                GetCursorPos(&c);
+                if (!g_dragging && (abs(c.x - g_pressAt.x) > GetSystemMetrics(SM_CXDRAG) ||
+                                    abs(c.y - g_pressAt.y) > GetSystemMetrics(SM_CYDRAG)))
+                    BeginDrag(h);
+                if (g_dragging) {
+                    DragTo(h, c);
+                    return 0;
+                }
+            }
             TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
             TrackMouseEvent(&t);
             SetHover(h, true);
@@ -1650,11 +1722,16 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             HideCard();
             return 0;
         case WM_LBUTTONUP:
-        case WM_RBUTTONUP:
+        case WM_RBUTTONUP: {
             KillTimer(h, kCardTimer);
             HideCard();
-            PostMessageW(g_notify, g_clickMsg, 0, 0);
+            bool dragged = g_dragging;
+            g_pressed = false;
+            if (dragged) Drop(h);  // a drag is not a click
+            if (msg == WM_LBUTTONUP && GetCapture() == h) ReleaseCapture();
+            if (!dragged) PostMessageW(g_notify, g_clickMsg, 0, 0);
             return 0;
+        }
         case WM_MOUSEACTIVATE:
             return MA_NOACTIVATE;
     }
@@ -1948,6 +2025,7 @@ int StepPastOtherWidgets(int edge, const RECT& bar, bool vertical, bool rtl) {
 
 bool Reposition() {
     if (!Alive()) return false;
+    if (g_dragging) return true;  // the mouse places the strip until the drop
     SyncMirrors();
     if (g_primaryHidden) return true;  // only another monitor's taskbar shows the strip
     RECT bar{}, client{};
@@ -2061,7 +2139,7 @@ bool Reposition() {
     POINT p{ edge, bar.top };
     ScreenToClient(g_taskbar, &p);
     int left = p.x - g_size.cx - Px(2);
-
+    g_anchorLeft = left;
 
     // Optional user override in DPI-independent pixels (e.g. for custom padding).
     DWORD customOffset = 0, sz = sizeof(customOffset);
