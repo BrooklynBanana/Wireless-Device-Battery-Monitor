@@ -54,6 +54,24 @@ bool IsVxeR1(USHORT vid, USHORT pid) {
     return false;
 }
 
+// 3554:FB40 is shared by BY keyboards and IO by Red Square's Aurora Pro / Ergo Pro
+// mouse receivers. Their device requests (#3193, #3330, #3531) show 17-byte FF02
+// reports and an 8-byte FF04 feature collection; the BY keyboard protocol uses
+// >=20-byte FF02 reports. Keep this exception narrow to avoid waking keyboards.
+// Aurora Pro detection confirmed on hardware, but battery percentage calibration differs
+// from the vendor application in one report (40% versus 27%). Ergo Pro is untested.
+bool IsIoMouseFb40(const PollContext& ctx) {
+    bool mouse = !ctx.Find(0x3554, 0xFB40, [](const HidColl& c) {
+        return c.iface == 1 && c.page() == 0xFF02 && c.usage() == 0x0002 &&
+               c.inLen() == 17 && c.outLen() == 17;
+    }).empty();
+    bool feature = !ctx.Find(0x3554, 0xFB40, [](const HidColl& c) {
+        return c.iface == 1 && c.page() == 0xFF04 && c.usage() == 0x0002 &&
+               c.featLen() == 8 && c.inLen() == 0 && c.outLen() == 0;
+    }).empty();
+    return mouse && feature;
+}
+
 // Attack Shark R11 Ultra (PR #3297): receiver 3554:FB44 and cable 3554:FB43, same protocol; one entry.
 bool IsR11Ultra(USHORT vid, USHORT pid) { return vid == 0x3554 && (pid == 0xFB43 || pid == 0xFB44); }
 
@@ -148,11 +166,10 @@ void PollKysona(PollContext& ctx) {
             // dongle 1178 a Holtek feature-report protocol (atk_bitmouse.cpp); never send them mouse frames,
             // even when they stay unclaimed (ATK app holding the port, mouse asleep).
             if (vid == 0x373B && (pid == 0x11CA || pid == 0x11CB || pid == 0x1203 || pid == 0x1204 || pid == 0x1178)) continue;
-            // 3554:FA09 / FB40 are the "BY" keyboard receivers (AULA, MCHOSE, also used by the Redragon
-            // K673) that aula.cpp handles. Their FF02:0002 collection passes the size check below, so a
-            // keyboard aula.cpp could not read got two mouse frames every poll, which kept a K673 from
-            // going to sleep (issue #191). Never send them mouse frames.
-            if (vid == 0x3554 && (pid == 0xFA09 || pid == 0xFB40)) continue;
+            // 3554:FA09 is a BY keyboard receiver; FB40 is shared by BY keyboards and IO mice.
+            // Keep both keyboard layouts excluded (issue #191). Probe FB40 only when it has
+            // the distinct 17-byte IO receiver layout recorded in device requests.
+            if (vid == 0x3554 && (pid == 0xFA09 || (pid == 0xFB40 && !IsIoMouseFb40(ctx)))) continue;
             // Same for HECATE headsets (G2 Wireless 7.1, issue #1358): mouse frames only go to HECATE mouse ids.
             if (vid == 0x35BB && !IsHecateMouse(pid)) continue;
             // Kysona exposes a dedicated 17-byte collection; ATK / VXE receivers put report 08 in a
@@ -194,7 +211,9 @@ void PollKysona(PollContext& ctx) {
                 if (vid == 0x3710) s.name = PulsarModel(d, pid, battery);
                 if (s.name.empty()) s.name = CleanName(HidProduct(*c), vid, pid);
                 s.kind = KindFromCollections(ctx.colls, vid, pid);
-                if (s.kind == DeviceKind::Other) s.kind = DeviceKind::Mouse;
+                // IO 8K receivers also emulate a keyboard for control keys.
+                if (vid == 0x3554 && pid == 0xFB40) s.kind = DeviceKind::Mouse;
+                else if (s.kind == DeviceKind::Other) s.kind = DeviceKind::Mouse;
                 s.via = IsCable(vid, pid) ? L"USB cable" : L"2.4 GHz receiver";
                 s.graceSec = 1800;
                 // A mouse plugged in for charging can show up twice (cable + dongle); keep one.
