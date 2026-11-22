@@ -121,6 +121,7 @@ void PollSemico(PollContext& ctx);    // Semico 1A2C keyboards (Attack Shark X98
 void PollAjazzAk992(PollContext& ctx); // AJAZZ AK992 on the Telink 2.4 GHz receiver
 void PollFractal(PollContext& ctx);   // Fractal Design Scape headset (dongle or cable)
 void PollJabra(PollContext& ctx);     // Jabra GNP headsets, on USB or behind a Link dongle
+void PollJblSpeaker(PollContext& ctx); // JBL Flip 7 over Bluetooth LE (PR #274; refreshed on its own thread)
 void PollJbl(PollContext& ctx);       // JBL Quantum wireless headsets (HIDV1 and HIDV3)
 void PollRog(PollContext& ctx);       // ASUS ROG keyboards, mice and the Pelta headset
 void PollZowie(PollContext& ctx);     // BenQ ZOWIE EC-CW / DW / U2 mice

@@ -114,6 +114,8 @@ test: test-update-core test-update-win test-update-signature
 	./build/hyperx_haste_driver_test.exe
 	$(CXX) $(CXXFLAGS) tests/hyperx_dart_driver_test.cpp src/drivers/hyperx.cpp -o build/hyperx_dart_driver_test.exe
 	./build/hyperx_dart_driver_test.exe
+	$(CXX) -std=c++17 -O2 -Wall -Isrc tests/jbl_speaker_protocol_test.cpp -o build/jbl_speaker_protocol_test.exe
+	./build/jbl_speaker_protocol_test.exe
 	$(CXX) $(CXXFLAGS) tests/jbl_quantum810_driver_test.cpp src/drivers/jbl.cpp -o build/jbl_quantum810_driver_test.exe
 	./build/jbl_quantum810_driver_test.exe
 	$(CXX) $(CXXFLAGS) tests/hyperx_cloud_flight_s_driver_test.cpp src/drivers/hyperx.cpp -o build/hyperx_cloud_flight_s_driver_test.exe
