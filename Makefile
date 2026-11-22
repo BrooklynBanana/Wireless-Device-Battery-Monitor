@@ -48,6 +48,8 @@ test: test-update-core test-update-win test-update-signature
 	./build/runtime_estimate_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/charge_estimate_test.cpp -o build/charge_estimate_test.exe
 	./build/charge_estimate_test.exe
+	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/reading_freshness_test.cpp -o build/reading_freshness_test.exe
+	./build/reading_freshness_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/demo_history_test.cpp -o build/demo_history_test.exe
 	./build/demo_history_test.exe
 	$(CXX) $(CXXFLAGS) tests/aula_mouse_driver_test.cpp src/drivers/aula_mouse.cpp -o build/aula_mouse_driver_test.exe

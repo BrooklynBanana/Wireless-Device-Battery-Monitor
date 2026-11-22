@@ -30,6 +30,7 @@
 #include "i18n.h"
 #include "json_output.h"
 #include "labels.h"
+#include "reading_freshness.h"
 #include "refresh_policy.h"
 #include "memory_trim.h"
 #include "report.h"
@@ -133,6 +134,7 @@ struct TrayEntry {
     DeviceStatus st;
     int lastPct = -1;        // last known percentage, kept while the device sleeps
     ULONGLONG lastSeen = 0;
+    ULONGLONG lastReadingTick = 0;  // last confirmed battery sample (PR #2143), for "Last reading: 5 min ago"
     bool added = false;
     bool lowWarned = false;
     bool limitWarned = false;  // "unplug at 80%" already shown during this charge
@@ -670,9 +672,34 @@ std::wstring ApproxMinutes(int mins) {
              : TF(L"~{hours} h", { { L"hours", std::to_wstring(h) } });
 }
 
+// How old the last confirmed reading is (PR #2143), never counting failed polls.
+std::wstring FreshnessText(const TrayEntry& e) {
+    if (!e.lastReadingTick) return L"";
+    ULONGLONG now = GetTickCount64(), age = reading_freshness::AgeMinutes(e.lastReadingTick, now);
+    std::wstring ago = age == 0 ? std::wstring(T(L"just now"))
+                     : age < 60 ? TF(L"{count} min ago", { { L"count", std::to_wstring(age) } })
+                     : age < 1440 ? TF(L"{count} h ago", { { L"count", std::to_wstring(age / 60) } })
+                                  : TF(L"{count} d ago", { { L"count", std::to_wstring(age / 1440) } });
+    switch (reading_freshness::Classify(e.lastReadingTick, now, g_pollIntervalMs)) {
+        case reading_freshness::State::Fresh: return TF(L"Last reading: {age}", { { L"age", ago } });
+        case reading_freshness::State::Delayed: return TF(L"Delayed reading: {age}", { { L"age", ago } });
+        case reading_freshness::State::Stale: return TF(L"Stale reading: {age}", { { L"age", ago } });
+        default: return L"";
+    }
+}
+
+bool IsStale(const TrayEntry& e) {
+    return reading_freshness::Classify(e.lastReadingTick, GetTickCount64(), g_pollIntervalMs) ==
+           reading_freshness::State::Stale;
+}
+
 std::wstring StatusText(const TrayEntry& e) {
     const auto& s = e.st;
-    if (!s.connected) return T(L"off / not connected");
+    if (!s.connected) {
+        std::wstring off = T(L"off / not connected");
+        if (e.lastReadingTick) off += L", " + FreshnessText(e);
+        return off;
+    }
     std::wstring t;
     if (!s.levelText.empty() && s.percent >= 0) t = T(s.levelText);
     else if (s.percent >= 0) t = std::to_wstring(s.percent) + L"%";
@@ -695,6 +722,7 @@ std::wstring StatusText(const TrayEntry& e) {
         std::wstring left = battery_history::TimeToEmpty(s.key);  // the "Battery history" estimate
         if (!left.empty()) t += L", " + TF(L"{time} to empty", { { L"time", left } });
     }
+    if (e.lastReadingTick) t += L", " + FreshnessText(e);
     return t;
 }
 
@@ -799,7 +827,7 @@ void ApplyEntry(TrayEntry& e) {
     }
     // Never display an old percentage as a live reading for an explicitly offline device.
     int shown = !s.connected ? -1 : (s.percent >= 0 ? s.percent : e.lastPct);
-    bool dim = ShouldDim(s);
+    bool dim = ShouldDim(s) || IsStale(e);  // a stale reading is not shown as live (PR #2143)
     // Fully charged on power: the normal green bar instead of the blue charging one.
     bool charging = s.connected && !s.asleep && s.charging && !s.full && shown < 100;
     Accent accent = AccentFor(s);
@@ -875,7 +903,7 @@ void UpdateWidget() {
         }
         it.charging = !offline && !e->st.asleep && e->st.charging;
         it.full = !offline && (e->st.full || (e->st.charging && it.percent >= 100));
-        it.dim = ShouldDim(e->st);
+        it.dim = ShouldDim(e->st) || IsStale(*e);
         it.low = !offline && !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
         it.bluetooth = e->st.via == L"Bluetooth";
         it.wirelessLink = !offline && e->st.via.rfind(L"2.4 GHz", 0) == 0;
@@ -955,6 +983,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
         const int previousPercent = e.st.connected && !e.st.asleep ? e.st.percent : -1;  // the last fresh reading
         e.st = s;
         if (s.percent >= 0) e.lastPct = s.percent;
+        if (reading_freshness::Confirmed(s.percent, s.connected, s.asleep)) e.lastReadingTick = GetTickCount64();
         e.lastSeen = GetTickCount64();
         seen[s.key] = true;
         // Evaluate even in widget mode: ApplyEntry only manages tray icons.
