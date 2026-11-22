@@ -27,4 +27,6 @@ struct Point { long long secondsAgo; int percent; bool charging; };
 std::vector<Point> Recent(const std::wstring& key, int hours);
 // Non-modal native Win32 history viewer; device identity remains the original key.
 void Show(HWND owner, const std::wstring& key, const std::wstring& displayName);
+// The viewer's "Estimated time to empty" as text ("~2 d 5 h"), or empty when there is none.
+std::wstring TimeToEmpty(const std::wstring& key);
 } // namespace battery_history

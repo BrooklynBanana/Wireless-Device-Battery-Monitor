@@ -61,7 +61,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -115,6 +115,17 @@ bool g_beforeApps = false;   // widget just left of the taskbar apps (menu optio
 bool g_keepMouseLastKnown = false;  // with "Hide last known", still show mice (menu option, PR #1422)
 bool g_brandColors = false;  // off by default; known brands get their color (Razer green, Logitech blue, ...)
 std::atomic<DWORD> g_pollIntervalMs{ 60 * 1000 };  // set from the menu, read by the worker thread
+bool g_trackSince = false, g_trackAwake = false, g_trackEmpty = false;  // "Battery tracking" menu, off by default
+bool g_demo = false;         // --demo (see DemoDevices)
+
+// Battery tracking: when each device was last charged and roughly how long it was awake since.
+// One REG_BINARY value per device key under HKCU\Software\WirelessBattery\ChargeTracker.
+const wchar_t* kTrackerKey = L"Software\\WirelessBattery\\ChargeTracker";
+struct ChargeRecord {
+    ULONGLONG since = 0;     // when the last charge ended, in seconds since 1601 (0 = not yet)
+    ULONGLONG awakeSec = 0;  // seconds awake since then
+    LONGLONG lastPct = -1;   // last live level (a jump up means it was charged)
+};
 
 struct TrayEntry {
     UINT uid = 0;
@@ -128,12 +139,54 @@ struct TrayEntry {
     charge::Tracker charge;    // readings of the current charge, for "full in ~40 min"
     std::wstring iconSig;    // what the current icon shows, to avoid needless redraws
     HICON icon = nullptr;
+    ChargeRecord chargeRecord;  // battery tracking (PR #3648)
+    bool chargeLoaded = false;
 };
 std::map<std::wstring, TrayEntry> g_entries;
 std::map<std::wstring, bool> g_alertLatches;  // survive transient removal of a device
 bool g_alertIconAdded = false;  // short-lived tray icon for widget-mode notifications
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
+ULONGLONG g_lastPollTick = 0;  // when the previous poll's results arrived
+
+ULONGLONG NowSec() {
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return (((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime) / 10000000;
+}
+
+// A new charge cycle starts while the device charges or is full on power, when it is first seen, or when its level
+// rose by 10 points or more (no charging flag, or charged while the app was closed). Each answered poll adds up to
+// one interval awake.
+void TrackCharge(TrayEntry& e, const DeviceStatus& s, ULONGLONG sampleMs) {
+    ChargeRecord& r = e.chargeRecord;
+    if (!e.chargeLoaded) {
+        DWORD sz = sizeof(r);
+        LSTATUS st = RegGetValueW(HKEY_CURRENT_USER, kTrackerKey, s.key.c_str(), RRF_RT_REG_BINARY, nullptr, &r, &sz);
+        if (st != ERROR_SUCCESS || sz != sizeof(r))
+            r = ChargeRecord{};
+        e.chargeLoaded = true;
+    }
+    ChargeRecord before = r;
+    bool awake = s.connected && !s.asleep && s.percent >= 0;
+    if (s.charging || s.full || !r.since || (awake && r.lastPct >= 0 && s.percent >= r.lastPct + 10)) {
+        r.since = NowSec();
+        r.awakeSec = 0;
+    } else if (awake) {
+        r.awakeSec += sampleMs / 1000;
+    }
+    if (awake) r.lastPct = s.percent;
+    if (memcmp(&before, &r, sizeof(r)) != 0)
+        RegSetKeyValueW(HKEY_CURRENT_USER, kTrackerKey, s.key.c_str(), REG_BINARY, &r, sizeof(r));
+}
+
+std::wstring Duration(ULONGLONG sec) {
+    std::wstring d = std::to_wstring(sec / 86400), h = std::to_wstring(sec / 3600 % 24);
+    std::wstring m = std::to_wstring(sec / 60 % 60);
+    if (sec >= 86400) return TF(L"{days} d {hours} h", { { L"days", d }, { L"hours", h } });
+    if (sec >= 3600) return TF(L"{hours} h {minutes} min", { { L"hours", h }, { L"minutes", m } });
+    return TF(L"{minutes} min", { { L"minutes", m } });
+}
 
 // User-supplied names are presentation-only, keyed by stable DeviceStatus.key.
 // Driver identity, HID polling, brand detection and device diagnostics are unchanged.
@@ -449,6 +502,12 @@ bool LoadBeforeApps() { return LoadBoolSetting(L"WidgetBeforeApps", false); }
 void SaveBeforeApps(bool on) { SaveBoolSetting(L"WidgetBeforeApps", on); }
 bool LoadBrandColors() { return LoadBoolSetting(L"BrandColors", false); }
 void SaveBrandColors(bool on) { SaveBoolSetting(L"BrandColors", on); }
+bool LoadTrackSince() { return LoadBoolSetting(L"TrackSinceCharge", false); }
+void SaveTrackSince(bool on) { SaveBoolSetting(L"TrackSinceCharge", on); }
+bool LoadTrackAwake() { return LoadBoolSetting(L"TrackAwakeTime", false); }
+void SaveTrackAwake(bool on) { SaveBoolSetting(L"TrackAwakeTime", on); }
+bool LoadTrackEmpty() { return LoadBoolSetting(L"TrackTimeToEmpty", false); }
+void SaveTrackEmpty(bool on) { SaveBoolSetting(L"TrackTimeToEmpty", on); }
 DWORD LoadPollSeconds() {
     DWORD v = 60, sz = sizeof(v);
     RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, L"PollIntervalSeconds", RRF_RT_REG_DWORD, nullptr, &v, &sz);
@@ -623,6 +682,16 @@ std::wstring StatusText(const TrayEntry& e) {
     else if (s.charging) t += std::wstring(L", ") + T(L"charging");
     if (s.asleep) t += std::wstring(L", ") + T(L"asleep");
     if (!s.note.empty() && s.percent < 0) t += std::wstring(L", ") + T(s.note);
+    const ChargeRecord& c = e.chargeRecord;
+    if (c.since && !s.charging && !s.full) {
+        ULONGLONG now = NowSec(), age = now > c.since ? now - c.since : 0;
+        if (g_trackSince) t += L", " + TF(L"{time} since charge", { { L"time", Duration(age) } });
+        if (g_trackAwake) t += L", " + TF(L"~{time} awake", { { L"time", Duration(c.awakeSec) } });
+    }
+    if (g_trackEmpty && g_recordHistory && !s.charging && !s.full) {
+        std::wstring left = battery_history::TimeToEmpty(s.key);  // the "Battery history" estimate
+        if (!left.empty()) t += L", " + TF(L"{time} to empty", { { L"time", left } });
+    }
     return t;
 }
 
@@ -867,6 +936,9 @@ void SmoothCharging(DeviceStatus& s) {
 void OnResults(std::vector<DeviceStatus>& results) {
     for (auto& s : results) SmoothCharging(s);
     std::map<std::wstring, bool> seen;
+    ULONGLONG tick = GetTickCount64();
+    ULONGLONG sampleMs = g_lastPollTick ? std::min<ULONGLONG>(tick - g_lastPollTick, g_pollIntervalMs) : 0;
+    g_lastPollTick = tick;
     for (auto& s : results) {
         auto& e = g_entries[s.key];
         if (!e.uid) e.uid = StableId(s.key);
@@ -900,6 +972,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
         } else if (s.charging) {
             e.shortWarned = false;
         }
+        if (!g_demo && (g_trackSince || g_trackAwake)) TrackCharge(e, s, sampleMs);
         ApplyEntry(e);
         if (notify) ShowBatteryAlert(e);
         else if (limit) ShowChargeLimitAlert(e);
@@ -1133,6 +1206,27 @@ int LoadChargeLimit() {
     return 0;
 }
 
+void SetTrackSince(bool on) {
+    g_trackSince = on;
+    SaveTrackSince(on);
+    RedrawAll();
+    UpdateWidget();
+}
+
+void SetTrackAwake(bool on) {
+    g_trackAwake = on;
+    SaveTrackAwake(on);
+    RedrawAll();
+    UpdateWidget();
+}
+
+void SetTrackEmpty(bool on) {
+    g_trackEmpty = on;
+    SaveTrackEmpty(on);
+    RedrawAll();
+    UpdateWidget();
+}
+
 void SetPollSeconds(DWORD seconds) {
     g_pollIntervalMs = seconds * 1000;
     SavePollSeconds(seconds);
@@ -1269,6 +1363,14 @@ void ShowMenu() {
     }
     AppendMenuW(m, MF_STRING | (g_shortRuntimeAlert ? MF_CHECKED : 0) | (g_recordHistory ? 0 : MF_GRAYED), ID_SHORT_RUNTIME_ALERT,
                 T(L"Warn when a battery won't last the day"));
+    {
+        HMENU sub = CreatePopupMenu();
+        AppendMenuW(sub, MF_STRING | (g_trackSince ? MF_CHECKED : 0), ID_TRACK_SINCE, T(L"Time since charge"));
+        AppendMenuW(sub, MF_STRING | (g_trackAwake ? MF_CHECKED : 0), ID_TRACK_AWAKE, T(L"Awake time (rough)"));
+        UINT emptyFlags = MF_STRING | (g_trackEmpty ? MF_CHECKED : 0) | (g_recordHistory ? 0 : MF_GRAYED);
+        AppendMenuW(sub, emptyFlags, ID_TRACK_EMPTY, T(L"Estimated time to empty"));  // needs the recorded history
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, T(L"Battery tracking"));
+    }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // Display settings (PR #3292): how and where the devices are shown, in one submenu.
     HMENU display = CreatePopupMenu();
@@ -1462,6 +1564,9 @@ void ShowMenu() {
             widget::SetCardOptions(g_hoverCard, g_hoverChart);
             UpdateWidget();
             break;
+        case ID_TRACK_SINCE: SetTrackSince(!g_trackSince); break;
+        case ID_TRACK_AWAKE: SetTrackAwake(!g_trackAwake); break;
+        case ID_TRACK_EMPTY: SetTrackEmpty(!g_trackEmpty); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MONITOR_ALL: SetWidgetMonitor(L"all"); break;
         case ID_LANG_AUTO: SetLanguage(L""); break;
@@ -1542,8 +1647,6 @@ void ShowMenu() {
 // `--demo`: one sample device of every brand instead of real ones, for screenshots and for checking the
 // brand colors without owning the hardware. Keys, vendor ids and names are mixed on purpose, so every way
 // of recognising a brand gets used.
-bool g_demo = false;
-
 std::vector<DeviceStatus> DemoDevices() {
     auto make = [](const wchar_t* key, const wchar_t* name, DeviceKind kind, int pct, unsigned short vid, bool charging) {
         DeviceStatus s;
@@ -1973,6 +2076,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_hoverCard = LoadBoolSetting(L"HoverCard", true);
     g_hoverChart = LoadBoolSetting(L"HoverCardChart", true);
     widget::SetCardOptions(g_hoverCard, g_hoverChart);
+    g_trackSince = LoadTrackSince();
+    g_trackAwake = LoadTrackAwake();
+    g_trackEmpty = LoadTrackEmpty();
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();
     g_stacked = LoadStacked();
