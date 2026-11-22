@@ -1796,6 +1796,25 @@ void SetBackground(bool on) {
     PaintAll();
 }
 
+// One line of text with the strip's content (PR #369, for status bars such as YASB): glyph, level, a bolt
+// while charging, "~" for a last known value and "!" when low.
+std::wstring ItemsToText(const std::vector<WidgetItem>& items) {
+    std::wstring out;
+    for (const auto& it : items) {
+        if (!out.empty()) out += L"  ";
+        out += Glyph(it.kind, it.bluetooth);
+        out += L' ';
+        if (it.dim && it.percent >= 0) out += L'~';
+        out += !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
+        if (it.charging) {
+            out += L' ';
+            out += kBolt;
+        }
+        if (it.low) out += L'!';
+    }
+    return out;
+}
+
 void SetConnectionIcons(bool on) {
     g_connectionIcons = on;
     PaintAll();

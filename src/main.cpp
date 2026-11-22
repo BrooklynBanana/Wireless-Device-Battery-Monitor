@@ -1999,7 +1999,31 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // `BatteryHub.exe --list` prints what it finds, `--dump` every HID collection.
-int ListToConsole(bool dump) {
+// What `--text` prints (PR #369): the taskbar widget's content as one line, for status bars such as YASB.
+// Same order, hidden devices and low-battery rule as the widget (settings are read from the registry).
+// A one-shot run has no memory of earlier values, so a device that is asleep right now shows "?".
+std::wstring ListAsText(const std::vector<DeviceStatus>& list) {
+    g_hideLastKnown = LoadHideLastKnown();
+    LoadHidden();
+    LoadOrder();
+    g_entries.clear();
+    for (const auto& s : list) g_entries[s.key].st = s;
+    std::vector<WidgetItem> items;
+    for (const TrayEntry* e : OrderedEntries(true)) {
+        WidgetItem it;
+        it.kind = e->st.kind;
+        it.percent = e->st.connected ? e->st.percent : -1;
+        if (e->st.percent >= 0) it.text = e->st.levelText;
+        it.charging = e->st.connected && !e->st.asleep && e->st.charging;
+        it.dim = ShouldDim(e->st);
+        it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
+        it.bluetooth = e->st.via == L"Bluetooth";
+        items.push_back(it);
+    }
+    return widget::ItemsToText(items);
+}
+
+int ListToConsole(bool dump, bool text = false) {
     HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
     if (!out || out == INVALID_HANDLE_VALUE) {
         if (AttachConsole(ATTACH_PARENT_PROCESS)) out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
@@ -2039,6 +2063,11 @@ int ListToConsole(bool dump) {
     }
     auto list = PollAllDevices();
     list.erase(std::remove_if(list.begin(), list.end(), [](const DeviceStatus& s) { return s.unsupported; }), list.end());  // menu-only entries
+    if (text) {
+        std::wstring line = ListAsText(list);
+        if (!line.empty()) write(line + L"\n");
+        return 0;
+    }
     if (list.empty()) write(L"No devices with battery info found.\n");
     for (auto& s : list) {
         Accent accent = BrandOf(s);
@@ -2099,6 +2128,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     if (argv) LocalFree(argv);
     if (applyResult >= 0) return applyResult;
     if (cmdLine && wcsstr(cmdLine, L"--list")) return ListToConsole(false);
+    if (cmdLine && wcsstr(cmdLine, L"--text")) return ListToConsole(false, true);
     if (cmdLine && wcsstr(cmdLine, L"--dump")) return ListToConsole(true);
     if (cmdLine && wcsstr(cmdLine, L"--report")) {  // the "Request support for a device" window on its own
         i18n::Init();

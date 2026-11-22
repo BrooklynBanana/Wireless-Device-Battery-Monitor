@@ -317,6 +317,7 @@ automatic replacement of portable copies are deferred.
 ```
 BatteryHub.exe --list     # print every device and its battery level, then exit
 BatteryHub.exe --json     # print a JSON array of devices and battery levels, then exit
+BatteryHub.exe --text     # the taskbar text as one line ("<glyph> 80%  <glyph> 33%"), for status bars such as YASB
 BatteryHub.exe --dump     # every HID collection, HID devices that could not be opened, all USB devices (also ones
                                # without a HID interface) and Bluetooth devices; also saved to %TEMP%\BatteryHub-dump.txt
 BatteryHub.exe --report   # open the "Request support for a device" window
