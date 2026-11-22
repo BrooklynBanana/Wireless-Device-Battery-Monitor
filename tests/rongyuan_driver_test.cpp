@@ -181,14 +181,15 @@ int main() {
     kbPercent = 80;
     ctx = Poll();
     assert(ctx.out.size() == 2 && routes == 0 && infoQueries == 0);
-    assert(ctx.out[0].name == L"Wireless keyboard" && ctx.out[0].percent == 80);
-    assert(ctx.out[1].name == L"Wireless mouse" && ctx.out[1].percent == 100);
+    // No id was read, so the receiver's brand ("AJAZZ 2.4G 8K") names both, as for other Rongyuan receivers.
+    assert(ctx.out[0].name == L"AJAZZ wireless keyboard" && ctx.out[0].percent == 80);
+    assert(ctx.out[1].name == L"AJAZZ wireless mouse" && ctx.out[1].percent == 100);
     Unplug();
 
     // Receivers of other vendors are only read, never re-routed.
     Reset();
     ctx = Poll(Collection(0x342D, 0xE3E0, L"other"));
-    assert(ctx.out.size() == 1 && ctx.out[0].name == L"Wireless mouse" && routes == 0);
+    assert(ctx.out.size() == 1 && ctx.out[0].name == L"AJAZZ wireless mouse" && routes == 0);  // stub product name
     Unplug();
 
     // Collections other than the vendor control one are not opened.

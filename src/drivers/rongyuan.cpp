@@ -152,6 +152,7 @@ void PollRongyuan(PollContext& ctx) {
             std::wstring product = HidProduct(*c);
             bool generic = product.empty() || product.find(L"Receiver") != std::wstring::npos || product.find(L"2.4G") != std::wstring::npos;
             const wchar_t* mouseName = nullptr;
+            bool mouseIdAsked = false;  // the mouse's own id was asked for (shared dock: the receiver name says little)
             if (vid == 0x3151 && r[5] == 0) {  // AJAZZ-vendor receiver with the mouse online
                 MouseIdState st;
                 auto known = g_mouseIds.find(c->path);
@@ -164,6 +165,7 @@ void PollRongyuan(PollContext& ctx) {
                 }
                 if (st.tries) seenIds[c->path] = st;
                 mouseName = AjazzMouseName(st.id);
+                mouseIdAsked = st.tries > 0;
             }
             bool any = false;
             // Slot layout: [2] keyboard %, [3] mouse %, [4] keyboard offline, [5] mouse offline.
@@ -178,10 +180,13 @@ void PollRongyuan(PollContext& ctx) {
                 bool otherBrand = !brand.empty() && upper.find(L"ATTACK SHARK") == std::wstring::npos;
                 if (vid == 0x3151 && pid == 0x402D && !keyboard && !otherBrand) s.name = L"Attack Shark R3";
                 else if (vid == 0x3151 && pid == 0x5038 && keyboard) s.name = L"MonsGeek keyboard";  // receiver says "MonsGeek 2.4G Wireless Keyboard"
-                else if (generic && !brand.empty()) s.name = brand + (keyboard ? L" wireless keyboard" : L" wireless mouse");
+                else if (!keyboard && mouseName) s.name = mouseName;
+                // Not for a mouse whose own id was read and is not a known model: docks like 3151:5007 are
+                // shared by several brands, so the receiver's brand would often be wrong (PR #382).
+                else if (generic && !brand.empty() && (keyboard || !mouseIdAsked))
+                    s.name = brand + (keyboard ? L" wireless keyboard" : L" wireless mouse");
                 else if (vid == 0x3151 && pid == 0x5006 && keyboard && product.find(L"Akko") != std::wstring::npos)
                     s.name = L"Akko Air 01";
-                else if (!keyboard && mouseName) s.name = mouseName;
                 else if (generic) s.name = keyboard ? L"Wireless keyboard" : L"Wireless mouse";
                 else s.name = product;
                 s.kind = keyboard ? DeviceKind::Keyboard : DeviceKind::Mouse;
