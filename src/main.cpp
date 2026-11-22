@@ -1269,10 +1269,6 @@ void ShowMenu() {
     }
     AppendMenuW(m, MF_STRING | (g_shortRuntimeAlert ? MF_CHECKED : 0) | (g_recordHistory ? 0 : MF_GRAYED), ID_SHORT_RUNTIME_ALERT,
                 T(L"Warn when a battery won't last the day"));
-    AppendMenuW(m, MF_STRING | (g_hoverCard ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_HOVER_CARD,
-                T(L"Show a card when the mouse rests on a device"));
-    AppendMenuW(m, MF_STRING | (g_hoverChart ? MF_CHECKED : 0) | (g_wantWidget && g_hoverCard && g_recordHistory ? 0 : MF_GRAYED),
-                ID_HOVER_CHART, T(L"Show the last 24 hours in the card"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // Display settings (PR #3292): how and where the devices are shown, in one submenu.
     HMENU display = CreatePopupMenu();
@@ -1289,6 +1285,10 @@ void ShowMenu() {
                 T(L"Ring style (icon inside a battery ring)"));
     AppendMenuW(display, MF_STRING | (g_connectionIcons ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_CONNECTION_ICONS,
                 T(L"Mark devices on a 2.4 GHz receiver"));
+    AppendMenuW(display, MF_STRING | (g_hoverCard ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_HOVER_CARD,
+                T(L"Show a card when the mouse rests on a device"));
+    AppendMenuW(display, MF_STRING | (g_hoverChart ? MF_CHECKED : 0) | (g_wantWidget && g_hoverCard && g_recordHistory ? 0 : MF_GRAYED),
+                ID_HOVER_CHART, T(L"Show the last 24 hours in the card"));
     {
         HMENU sub = CreatePopupMenu();
         UINT f = MF_STRING | (g_wantWidget ? 0 : MF_GRAYED);
