@@ -46,6 +46,10 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 
 **Tray icons:** one icon per device with the number drawn in it, plus a "Low battery" notification at 15%. The app switches to this automatically when the taskbar is vertical or can't be found.
 
+**MyDockFinder (experimental):** while MyDockFinder is running, *Display settings* offers *Show on MyDockFinder*. The strip then sits left of MyFinder's system indicators on its bar and picks light or dark glyphs to match. It finds the indicators by having MyFinder draw its own bar in memory (no screen capture), so unusual themes or future MyDockFinder versions may throw the alignment off.
+
+**Moving the strip:** drag it along the taskbar to the left of its usual spot; it stays there. *Position on the taskbar* in the menu sets the same distance.
+
 **Custom device names:** open the device submenu and select *Rename device...* to set a name
 (up to 64 characters). The name is shown in the taskbar widget's tooltip/caption,
 tray tooltip and notifications, and the device menu. Use *Reset to original name*

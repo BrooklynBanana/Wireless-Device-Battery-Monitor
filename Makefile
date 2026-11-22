@@ -7,7 +7,7 @@ CHANNEL  ?= dev
 CXXFLAGS ?= -std=c++17 -Os -Wall -Wno-missing-field-initializers -ffunction-sections -fdata-sections \
             -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00
 LDFLAGS  ?= -municode -mwindows -static -s -Wl,--gc-sections
-LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lcomctl32 -lgdi32 -lruntimeobject -lws2_32 -lwinhttp -lbcrypt -lversion -lbluetoothapis
+LIBS     := -lhid -lsetupapi -lcfgmgr32 -lole32 -loleaut32 -lcomctl32 -lgdi32 -lruntimeobject -lws2_32 -lwinhttp -lbcrypt -lversion -lbluetoothapis -ld3d11 -ldxgi -ld2d1 -ldcomp -ldwmapi
 
 SRC := $(wildcard src/*.cpp) $(wildcard src/drivers/*.cpp)
 OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC)) build/app_res.o
@@ -15,7 +15,7 @@ OBJ := $(patsubst src/%.cpp,build/%.o,$(SRC)) build/app_res.o
 BatteryHub.exe: $(OBJ)
 	$(CXX) $(LDFLAGS) $^ -o $@ $(LIBS)
 
-build/%.o: src/%.cpp $(wildcard src/*.h src/drivers/*.h) build/version.h
+build/%.o: src/%.cpp $(wildcard src/*.h src/drivers/*.h native/*.h) build/version.h
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -municode -c $< -o $@
 
@@ -58,6 +58,10 @@ test: test-update-core test-update-win test-update-signature
 	./build/airpods_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/reading_freshness_test.cpp -o build/reading_freshness_test.exe
 	./build/reading_freshness_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/myfinder_layout_test.cpp -o build/myfinder_layout_test.exe
+	./build/myfinder_layout_test.exe
+	$(CXX) $(CXXFLAGS) -static tests/composition_hit_test.cpp -o build/composition_hit_test.exe $(LIBS)
+	./build/composition_hit_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/demo_history_test.cpp -o build/demo_history_test.exe
 	./build/demo_history_test.exe
 	$(CXX) $(CXXFLAGS) tests/aula_mouse_driver_test.cpp src/drivers/aula_mouse.cpp -o build/aula_mouse_driver_test.exe

@@ -63,7 +63,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_ANIMATE_CHARGING, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_ANIMATE_CHARGING, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET, ID_MODE_MYFINDER,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -89,6 +89,7 @@ HWND g_hwnd;
 HANDLE g_refreshEvt, g_stopEvt, g_worker;
 UINT g_taskbarCreatedMsg;
 bool g_lightTaskbar;
+bool g_myFinder = false;  // widget mode on MyDockFinder's bar instead of the taskbar (PR #251)
 bool g_wantWidget = true;      // user's choice: taskbar widget (default) or tray icons
 bool g_useWidget = false;      // what is actually shown right now
 bool g_hideLastKnown = false;  // hide (last known) / asleep devices from taskbar and tray
@@ -1477,9 +1478,13 @@ void ShowMenu() {
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // Display settings (PR #3292): how and where the devices are shown, in one submenu.
     HMENU display = CreatePopupMenu();
-    AppendMenuW(display, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, T(L"Show on the taskbar (icon + percentage)"));
+    AppendMenuW(display, MF_STRING | (g_wantWidget && !g_myFinder ? MF_CHECKED : 0), ID_MODE_WIDGET,
+                T(L"Show on the taskbar (icon + percentage)"));
     AppendMenuW(display, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, T(L"Show as tray icons"));
-    CheckMenuRadioItem(display, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
+    // Offered once MyDockFinder is running, or while it is the chosen mode.
+    if (g_myFinder || FindWindowW(L"MyFinderApp", nullptr))
+        AppendMenuW(display, MF_STRING | (g_wantWidget && g_myFinder ? MF_CHECKED : 0), ID_MODE_MYFINDER,
+                    T(L"Show on MyDockFinder (experimental)"));
     AppendMenuW(display, MF_STRING | (g_trayDeviceIcons ? MF_CHECKED : 0) | (g_wantWidget ? MF_GRAYED : 0), ID_TRAY_DEVICE_ICONS,
                 T(L"Tray icons show the device type"));
     AppendMenuW(display, MF_SEPARATOR, 0, nullptr);
@@ -1710,7 +1715,16 @@ void ShowMenu() {
             if (!g_beforeApps && g_farLeft) SetFarLeft(false);
             SetBeforeApps(!g_beforeApps);
             break;
-        case ID_MODE_WIDGET: SetMode(true); break;
+        case ID_MODE_WIDGET:
+        case ID_MODE_MYFINDER:
+            if (g_myFinder != (cmd == ID_MODE_MYFINDER)) {
+                g_myFinder = cmd == ID_MODE_MYFINDER;
+                SaveBoolSetting(L"MyFinderWidget", g_myFinder);
+                widget::SetMyFinder(g_myFinder);
+                g_useWidget = false;  // the host changed: Reconcile re-creates the strip and refreshes it
+            }
+            SetMode(true);
+            break;
         case ID_MODE_TRAY: SetMode(false); break;
         case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://github.com/sponsors/krisgfx9", nullptr, nullptr, SW_SHOWNORMAL); break;
         case ID_REPORT: report::Show(g_inst, g_hwnd); break;
@@ -2223,6 +2237,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_refreshEvt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_wantWidget = LoadWidgetMode();
+    g_myFinder = LoadBoolSetting(L"MyFinderWidget", false);
+    widget::SetMyFinder(g_myFinder);
     g_hideLastKnown = LoadHideLastKnown();
     g_keepMouseLastKnown = LoadBoolSetting(L"KeepMouseLastKnown", false);
     g_trayWhenEmpty = LoadTrayWhenEmpty();

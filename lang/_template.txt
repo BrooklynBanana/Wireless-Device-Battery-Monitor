@@ -270,3 +270,4 @@ just now =
 Tray icons show the device type = 
 No battery info ({count}) = 
 Animate charging devices = 
+Show on MyDockFinder (experimental) = 

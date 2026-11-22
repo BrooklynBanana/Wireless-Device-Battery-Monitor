@@ -31,6 +31,9 @@ struct WidgetItem {
 };
 
 namespace widget {
+// Experimental MyDockFinder host (PR #251): the strip follows MyFinder's right-hand system indicators
+// instead of sitting on the Windows taskbar. Destroys the current strip; Create() makes the new one.
+void SetMyFinder(bool on);
 // The Segoe Fluent Icons glyph the strip uses for a kind of device (also used by the menu).
 wchar_t DeviceGlyph(DeviceKind kind, bool bluetooth);
 // Creates the widget on the primary taskbar. Clicks are reported by posting `clickMsg` to `notifyWnd`.
