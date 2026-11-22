@@ -62,7 +62,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -100,6 +100,7 @@ int g_chargeLimit = 0;        // "Notify when charged to" 80/85/90%, 0 = off (th
 bool g_shortRuntimeAlert = true;  // "charge today" notification when the time-to-empty is under 12 h (menu option)
 bool g_hoverCard = true;       // card when the mouse rests on a device (off: plain tooltip)
 bool g_hoverChart = true;      // 24-hour chart in that card
+bool g_trayDeviceIcons = false;  // tray mode: device symbol + level bar instead of the number (PR #1632)
 bool g_runtimeWidget = false;  // optionally show estimated remaining hours instead of % in taskbar widget
 std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all", "main" or one monitor id
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
@@ -548,7 +549,8 @@ void SetAutostart(bool on) {
 
 struct Rgb { BYTE r, g, b; };
 
-HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barColor, bool dim) {
+// deviceGlyph: `text` is a Segoe Fluent Icons / MDL2 glyph (tray device icons, PR #1632), drawn regular weight.
+HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barColor, bool dim, bool deviceGlyph = false) {
     HWND taskbar = FindWindowW(L"Shell_TrayWnd", nullptr);
     UINT dpi = taskbar ? GetDpiForWindow(taskbar) : 0;
     const int S = GetSystemMetricsForDpi(SM_CXSMICON, dpi ? dpi : GetDpiForSystem());
@@ -575,8 +577,20 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
 
     int bx0 = 0, by0 = 0, bx1 = -1, by1 = -1;
     for (int fh = textH * 2; fh >= 6; fh--) {
-        HFONT f = CreateFontW(-fh, 0, 0, 0, FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        static const wchar_t* iconFace = [] {  // Segoe Fluent Icons on Windows 11, MDL2 Assets on Windows 10
+            HDC probeDc = CreateCompatibleDC(nullptr);
+            HFONT probe = CreateFontW(-16, 0, 0, 0, FW_NORMAL, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe Fluent Icons");
+            HGDIOBJ old = SelectObject(probeDc, probe);
+            wchar_t actual[LF_FACESIZE] = {};
+            GetTextFaceW(probeDc, LF_FACESIZE, actual);
+            SelectObject(probeDc, old);
+            DeleteObject(probe);
+            DeleteDC(probeDc);
+            return _wcsicmp(actual, L"Segoe Fluent Icons") == 0 ? L"Segoe Fluent Icons" : L"Segoe MDL2 Assets";
+        }();
+        HFONT f = CreateFontW(-fh, 0, 0, 0, deviceGlyph ? FW_NORMAL : FW_BOLD, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                              CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, deviceGlyph ? iconFace : L"Segoe UI");
         HGDIOBJ oldF = SelectObject(dc, f);
         SetTextCharacterExtra(dc, text.size() >= 3 ? -1 : 0);
         memset(sbits, 0, (size_t)W * H * 4);
@@ -643,7 +657,8 @@ Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }
 
 Accent AccentFor(const DeviceStatus& s) { return g_brandColors ? BrandOf(s) : Accent::None; }
 
-HICON IconFor(int pct, bool charging, bool dim, Accent accent) {
+// glyph != 0: the device's symbol with the level as the bar, instead of the number (option, PR #1632).
+HICON IconFor(int pct, bool charging, bool dim, Accent accent, wchar_t glyph = 0) {
     Rgb fg = Foreground();
     BrandColor bc = AccentColor(accent, g_lightTaskbar);
     Rgb bar = charging        ? Rgb{ 0, 170, 255 }
@@ -652,6 +667,7 @@ HICON IconFor(int pct, bool charging, bool dim, Accent accent) {
             : accent != Accent::None ? Rgb{ bc.r, bc.g, bc.b }
                               : Rgb{ 30, 190, 90 };
     Rgb text = (!charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
+    if (glyph) return RenderIcon(std::wstring(1, glyph), pct, fg, bar, dim, true);
     std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
     return RenderIcon(t, pct, text, bar, dim);
 }
@@ -832,10 +848,12 @@ void ApplyEntry(TrayEntry& e) {
     bool charging = s.connected && !s.asleep && s.charging && !s.full && shown < 100;
     Accent accent = AccentFor(s);
     std::wstring sig = std::to_wstring(shown) + (charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k") +
-                       L"a" + std::to_wstring((int)accent) + (s.connected ? L"|on" : L"|off");
+                       L"a" + std::to_wstring((int)accent) + (s.connected ? L"|on" : L"|off") +
+                       (g_trayDeviceIcons ? L"|g" + std::to_wstring((int)s.kind) + (s.via == L"Bluetooth" ? L"b" : L"") : L"");
     if (sig != e.iconSig || !e.icon) {
         if (e.icon) DestroyIcon(e.icon);
-        e.icon = s.connected ? IconFor(shown, charging, dim, accent)
+        e.icon = s.connected ? IconFor(shown, charging, dim, accent,
+                                       g_trayDeviceIcons ? widget::DeviceGlyph(s.kind, s.via == L"Bluetooth") : 0)
                              : RenderIcon(L"\u00D7", -1, Foreground(), Foreground(), true);
         e.iconSig = sig;
     }
@@ -1416,6 +1434,8 @@ void ShowMenu() {
     AppendMenuW(display, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, T(L"Show on the taskbar (icon + percentage)"));
     AppendMenuW(display, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, T(L"Show as tray icons"));
     CheckMenuRadioItem(display, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
+    AppendMenuW(display, MF_STRING | (g_trayDeviceIcons ? MF_CHECKED : 0) | (g_wantWidget ? MF_GRAYED : 0), ID_TRAY_DEVICE_ICONS,
+                T(L"Tray icons show the device type"));
     AppendMenuW(display, MF_SEPARATOR, 0, nullptr);
     UINT bgFlags = MF_STRING | (g_widgetBackground ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED);
     AppendMenuW(display, bgFlags, ID_WIDGET_BACKGROUND, T(L"Background behind taskbar text (for transparent taskbars)"));
@@ -1608,6 +1628,11 @@ void ShowMenu() {
         case ID_TRACK_SINCE: SetTrackSince(!g_trackSince); break;
         case ID_TRACK_AWAKE: SetTrackAwake(!g_trackAwake); break;
         case ID_TRACK_EMPTY: SetTrackEmpty(!g_trackEmpty); break;
+        case ID_TRAY_DEVICE_ICONS:
+            g_trayDeviceIcons = !g_trayDeviceIcons;
+            SaveBoolSetting(L"TrayDeviceIcons", g_trayDeviceIcons);
+            for (auto& [k, e] : g_entries) ApplyEntry(e);
+            break;
         case ID_RUNTIME_WIDGET: g_runtimeWidget = !g_runtimeWidget; SaveRuntimeWidget(g_runtimeWidget); UpdateWidget(); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MONITOR_ALL: SetWidgetMonitor(L"all"); break;
@@ -2122,6 +2147,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_trackAwake = LoadTrackAwake();
     g_trackEmpty = LoadTrackEmpty();
     g_runtimeWidget = LoadRuntimeWidget();
+    g_trayDeviceIcons = LoadBoolSetting(L"TrayDeviceIcons", false);
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();
     g_stacked = LoadStacked();

@@ -267,3 +267,4 @@ just now =
 {count} min ago =
 {count} h ago =
 {count} d ago =
+Tray icons show the device type = 
