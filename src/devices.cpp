@@ -159,6 +159,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollBluetooth(ctx);   // before the generic HID check: Windows' own level wins for the same device
     PollGenericHid(ctx);
     PollXInput(ctx);
+    PollUnsupported(ctx);  // menu only: "No battery info"
     return ctx.out;
 }
 

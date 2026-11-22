@@ -268,3 +268,5 @@ just now =
 {count} h ago =
 {count} d ago =
 Tray icons show the device type = 
+No battery info ({count}) = 
+Animate charging devices = 

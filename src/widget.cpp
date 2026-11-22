@@ -18,6 +18,7 @@ bool g_background;  // opaque rounded plate behind the text, for transparent / r
 bool g_stacked;     // icon above the percentage (menu option, PR #525)
 bool g_showPercentSign = true;  // '%' after numeric levels (menu option, PR #1386)
 bool g_ringStyle;   // device icon inside a ring that fills with the charge (menu option, PR #110)
+bool g_animateCharging;  // charging icons fill green in a loop (menu option, PR #2463)
 bool g_connectionIcons;  // wireless mark after 2.4 GHz devices' levels (menu option, PR #2277)
 bool g_vertical;    // the primary taskbar is docked left or right: one block per device, stacked (PR #321)
 bool g_makeRoom = true;  // step past other apps' widgets in the taskbar instead of covering them
@@ -562,8 +563,10 @@ struct Canvas {
         int ob = c.b * a / 255 + db * inv / 255;
         px[y * w + x] = ((DWORD)oa << 24) | ((DWORD)orr << 16) | ((DWORD)og << 8) | (DWORD)ob;
     }
-    void Draw(const Mask& m, int x, int y, Rgb c, int alpha) {
-        for (int j = 0; j < m.h; j++)
+    // rowsFrom / rowsTo: only those rows of the mask (the charging fill animation draws part of an icon).
+    void Draw(const Mask& m, int x, int y, Rgb c, int alpha, int rowsTo = -1, int rowsFrom = 0) {
+        if (rowsTo < 0 || rowsTo > m.h) rowsTo = m.h;
+        for (int j = std::max(0, rowsFrom); j < rowsTo; j++)
             for (int i = 0; i < m.w; i++) Blend(x + i, y + j, c, m.a[j * m.w + i] * alpha / 255);
     }
 };
@@ -612,6 +615,7 @@ struct Piece {
     Mask halo;        // glow drawn behind the glyph (branded devices)
     int haloR = 0, haloAlpha = 0;
     int px = INT_MIN, py = 0;  // fixed top-left position (stacked and vertical layouts); INT_MIN = flow left to right
+    bool charging = false;  // animated fill (PR #2463)
     int item = -1;    // index in g_items of the device this piece belongs to (finds the device under the mouse)
 };
 
@@ -700,6 +704,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
             icon.halo = Halo(icon.m, icon.haloR);
             icon.haloAlpha = g_light ? 60 : 140;
         }
+        icon.charging = g_animateCharging && it.charging && !it.full;
         out.push_back(std::move(icon));
         std::wstring t = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + (g_showPercentSign ? L"%" : L"") : L"?";
         Piece label{ RenderMask(t, text, g_light), tc, a, mark || link ? Px(2) : 0 };
@@ -862,7 +867,18 @@ bool PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size, std::vector<RECT
                 for (int ox = -1; ox <= 1; ox++)
                     if (ox || oy) cv.Draw(p.m, xs[i] + ox, ys[i] + oy, barColor, 255);
         }
-        cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha);
+        if (p.charging) {
+            // Green fills the icon bottom to top, then drains from the bottom: a 2.4 s loop that ignores the
+            // level (the percentage and bar show that). The empty part stays in the normal colour, a bit dimmer.
+            Rgb green = g_light ? Rgb{ 0, 160, 40 } : Rgb{ 30, 230, 80 };
+            double t = (GetTickCount64() % 2400) / 2400.0;
+            int head = t < 0.5 ? (int)(p.m.h * t * 2) : p.m.h;
+            int tail = t < 0.5 ? 0 : (int)(p.m.h * (t - 0.5) * 2);
+            cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha * 80 / 100);
+            cv.Draw(p.m, xs[i], ys[i], green, p.alpha, p.m.h - tail, p.m.h - head);
+        } else {
+            cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha);
+        }
     }
 
     // Where each device sits, for the hover card: the span of its pieces, widened to meet its neighbours.
@@ -1251,6 +1267,7 @@ HWND g_cardStrip;      // strip the card was opened from (primary or a mirror)
 int g_hoverItem = -1;  // device under the mouse
 constexpr int kCardMessage = -2;
 constexpr UINT_PTR kCardTimer = 1;
+constexpr UINT_PTR kChargeTimer = 2;  // repaints the charging fill animation every 100 ms
 constexpr UINT kCardDelayMs = 400;
 const wchar_t* kCardClass = L"WirelessBatteryCard";
 
@@ -1621,6 +1638,9 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             if (wp == kCardTimer) {
                 KillTimer(h, kCardTimer);
                 if (g_hoverItem != -1) ShowCard(h, g_hoverItem);
+            } else if (wp == kChargeTimer) {
+                PaintAll();
+                widget::Reposition();
             }
             return 0;
         case WM_MOUSELEAVE:
@@ -1724,6 +1744,22 @@ void Destroy() {
 
 bool Alive() { return g_wnd && IsWindow(g_wnd) && g_taskbar && IsWindow(g_taskbar); }
 
+// The 100 ms repaint runs only while the animation is on and something is charging.
+void UpdateChargeTimer() {
+    if (!g_wnd) return;
+    bool any = false;
+    for (const auto& it : g_items) any |= it.charging && !it.full;
+    if (g_animateCharging && any) SetTimer(g_wnd, kChargeTimer, 100, nullptr);
+    else KillTimer(g_wnd, kChargeTimer);
+}
+
+void SetAnimateCharging(bool on) {
+    g_animateCharging = on;
+    UpdateChargeTimer();
+    PaintAll();
+    if (g_wnd) Reposition();
+}
+
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip) {
     g_items = items;
     if (tooltip != g_tipText) {
@@ -1733,6 +1769,7 @@ void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip)
     }
     PaintAll();
     Reposition();
+    UpdateChargeTimer();
     if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) {  // keep an open card up to date
         if (g_cardItem == kCardMessage ? g_items.empty() : g_cardItem < (int)g_items.size()) ShowCard(g_cardStrip, g_cardItem);
         else HideCard();

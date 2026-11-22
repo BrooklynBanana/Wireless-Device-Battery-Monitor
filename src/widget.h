@@ -52,6 +52,8 @@ void SetShowPercentSign(bool on);
 void SetRingStyle(bool on);
 // Small wireless mark after the level of devices on a 2.4 GHz receiver (kept across Create/Destroy).
 void SetConnectionIcons(bool on);
+// A charging device's icon fills green from the bottom in a loop (kept across Create/Destroy).
+void SetAnimateCharging(bool on);
 // Steps past other apps' widgets in the taskbar (e.g. a network graph or a countdown) that sit where the
 // strip would go, so both stay readable (kept across Create/Destroy).
 void SetMakeRoom(bool on);

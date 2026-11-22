@@ -181,6 +181,8 @@ void PollPressPlayIcarus(PollContext& ctx);  // ICARUS V2 Nearlink on its 7768:6
 void PollScyrox(PollContext& ctx);        // Scyrox V12M on its 2.4 GHz receiver (395A:0006), read-only profile read
 // Fallbacks.
 void PollHeadsetControl(PollContext &ctx); // only if headsetcontrol.exe is installed
+std::wstring HidContainer(const std::wstring& path);  // container id of the physical device behind a HID path
+void PollUnsupported(PollContext& ctx);  // last: wireless mice / keyboards no driver could read, flagged `unsupported`
 void PollGenericHid(PollContext &ctx);
 void PollBluetooth(PollContext &ctx);
 void PollXInput(PollContext &ctx);

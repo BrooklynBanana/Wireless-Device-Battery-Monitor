@@ -62,7 +62,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_ANIMATE_CHARGING, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -100,6 +100,7 @@ int g_chargeLimit = 0;        // "Notify when charged to" 80/85/90%, 0 = off (th
 bool g_shortRuntimeAlert = true;  // "charge today" notification when the time-to-empty is under 12 h (menu option)
 bool g_hoverCard = true;       // card when the mouse rests on a device (off: plain tooltip)
 bool g_hoverChart = true;      // 24-hour chart in that card
+bool g_animateCharging = false;  // charging icons fill in a loop on the taskbar (menu option, PR #2463)
 bool g_trayDeviceIcons = false;  // tray mode: device symbol + level bar instead of the number (PR #1632)
 bool g_runtimeWidget = false;  // optionally show estimated remaining hours instead of % in taskbar widget
 std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all", "main" or one monitor id
@@ -147,6 +148,7 @@ struct TrayEntry {
     bool chargeLoaded = false;
 };
 std::map<std::wstring, TrayEntry> g_entries;
+std::vector<std::wstring> g_unsupported;  // seen wireless mice / keyboards without a battery driver, menu only (PR #2463)
 std::map<std::wstring, bool> g_alertLatches;  // survive transient removal of a device
 bool g_alertIconAdded = false;  // short-lived tray icon for widget-mode notifications
 bool g_placeholder = false;
@@ -990,6 +992,11 @@ void SmoothCharging(DeviceStatus& s) {
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
+    g_unsupported.clear();
+    results.erase(std::remove_if(results.begin(), results.end(), [](const DeviceStatus& s) {
+                      if (s.unsupported) g_unsupported.push_back(s.name);
+                      return s.unsupported;
+                  }), results.end());
     for (auto& s : results) SmoothCharging(s);
     std::map<std::wstring, bool> seen;
     ULONGLONG tick = GetTickCount64();
@@ -1404,6 +1411,14 @@ void ShowMenu() {
         icons.SetLast(m, widget::DeviceGlyph(e->st.kind, e->st.via == L"Bluetooth"));
         keys.push_back(k);
     }
+    if (!g_unsupported.empty()) {  // detected, but no driver reads their battery (PR #2463)
+        HMENU un = CreatePopupMenu();
+        for (auto& n : g_unsupported) AppendMenuW(un, MF_STRING | MF_GRAYED, 0, n.c_str());
+        AppendMenuW(un, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(un, MF_STRING, ID_REPORT, T(L"Request support for a device..."));
+        std::wstring title = TF(L"No battery info ({count})", { { L"count", std::to_wstring(g_unsupported.size()) } });
+        AppendMenuW(m, MF_POPUP, (UINT_PTR)un, title.c_str());
+    }
     if (!all.empty()) AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING | (g_recordHistory ? MF_CHECKED : 0), ID_RECORD_HISTORY, T(L"Record battery history"));
     {
@@ -1444,6 +1459,8 @@ void ShowMenu() {
                 T(L"Show percent sign (%)"));
     AppendMenuW(display, MF_STRING | (g_ringStyle ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_RING_STYLE,
                 T(L"Ring style (icon inside a battery ring)"));
+    AppendMenuW(display, MF_STRING | (g_animateCharging ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_ANIMATE_CHARGING,
+                T(L"Animate charging devices"));
     AppendMenuW(display, MF_STRING | (g_connectionIcons ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_CONNECTION_ICONS,
                 T(L"Mark devices on a 2.4 GHz receiver"));
     AppendMenuW(display, MF_STRING | (g_hoverCard ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_HOVER_CARD,
@@ -1628,6 +1645,11 @@ void ShowMenu() {
         case ID_TRACK_SINCE: SetTrackSince(!g_trackSince); break;
         case ID_TRACK_AWAKE: SetTrackAwake(!g_trackAwake); break;
         case ID_TRACK_EMPTY: SetTrackEmpty(!g_trackEmpty); break;
+        case ID_ANIMATE_CHARGING:
+            g_animateCharging = !g_animateCharging;
+            SaveBoolSetting(L"AnimateCharging", g_animateCharging);
+            widget::SetAnimateCharging(g_animateCharging);
+            break;
         case ID_TRAY_DEVICE_ICONS:
             g_trayDeviceIcons = !g_trayDeviceIcons;
             SaveBoolSetting(L"TrayDeviceIcons", g_trayDeviceIcons);
@@ -2016,6 +2038,7 @@ int ListToConsole(bool dump) {
         return 0;
     }
     auto list = PollAllDevices();
+    list.erase(std::remove_if(list.begin(), list.end(), [](const DeviceStatus& s) { return s.unsupported; }), list.end());  // menu-only entries
     if (list.empty()) write(L"No devices with battery info found.\n");
     for (auto& s : list) {
         Accent accent = BrandOf(s);
@@ -2043,7 +2066,10 @@ int ListJson() {
         if (AttachConsole(ATTACH_PARENT_PROCESS))
             out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
     }
-    std::string text = DevicesToJson(PollAllDevices());  // UTF-8
+    auto devices = PollAllDevices();
+    devices.erase(std::remove_if(devices.begin(), devices.end(), [](const DeviceStatus& s) { return s.unsupported; }),
+                  devices.end());  // menu-only entries
+    std::string text = DevicesToJson(devices);  // UTF-8
     if (out && out != INVALID_HANDLE_VALUE) {
         DWORD written = 0;
         WriteFile(out, text.data(), (DWORD)text.size(), &written, nullptr);
@@ -2148,6 +2174,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_trackEmpty = LoadTrackEmpty();
     g_runtimeWidget = LoadRuntimeWidget();
     g_trayDeviceIcons = LoadBoolSetting(L"TrayDeviceIcons", false);
+    g_animateCharging = LoadBoolSetting(L"AnimateCharging", false);
+    widget::SetAnimateCharging(g_animateCharging);
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();
     g_stacked = LoadStacked();
