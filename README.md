@@ -335,6 +335,8 @@ also accepts `--help`. `--json` prints a stable array that scripts and bar widge
 ```
 
 `graceSec` is how long the app keeps showing the last known level while the device is asleep.
+
+While the app runs it also keeps `%LOCALAPPDATA%\WirelessBattery\status.json` up to date (the devices the widget shows, in its order), and deletes it on exit, for status bars that read a file instead of starting the exe. See [docs/yasb.md](docs/yasb.md) for a YASB setup.
 Adding new fields is backwards compatible.
 
 **Device not shown?** Right-click the widget or tray icon and choose **Request support for a device...**. Pick the device, check

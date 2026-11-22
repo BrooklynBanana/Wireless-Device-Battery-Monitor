@@ -31,6 +31,7 @@
 #include "json_output.h"
 #include "labels.h"
 #include "reading_freshness.h"
+#include "status_json.h"
 #include "refresh_policy.h"
 #include "memory_trim.h"
 #include "report.h"
@@ -898,6 +899,8 @@ std::vector<TrayEntry*> OrderedEntries(bool shownOnly) {
     return list;
 }
 
+void UpdateStatusSnapshot();
+
 void UpdateWidget() {
     if (!g_useWidget || !widget::Alive()) return;  // not alive while the strip is swapped for the tray
     std::vector<TrayEntry*> list = OrderedEntries(true);
@@ -961,6 +964,34 @@ void UpdateWidget() {
     }
     if (tip.empty()) tip = std::wstring(L"BatteryHub: ") + T(L"No devices with battery info found");
     widget::SetItems(items, tip);
+    UpdateStatusSnapshot();
+}
+
+// %LOCALAPPDATA%\WirelessBattery\status.json for external tools (PR #378: YASB, Rainmeter, scripts): the
+// devices the widget shows, in its order and with its hiding rules, rewritten whenever they change and
+// deleted on exit. Its document format is its own (see docs/yasb.md); `--json` keeps its array format.
+StatusDevice ToStatus(const DeviceStatus& s, int lastPct) {
+    StatusDevice d;
+    d.key = s.key;
+    d.name = s.name;
+    d.via = s.via;
+    d.detail = s.detail;
+    d.levelText = s.levelText;
+    d.kind = s.kind;
+    d.percent = s.percent;
+    d.lastPct = lastPct;
+    d.millivolts = s.millivolts;
+    d.charging = s.charging;
+    d.asleep = s.asleep;
+    d.connected = s.connected;
+    return d;
+}
+
+void UpdateStatusSnapshot() {
+    if (g_demo) return;
+    std::vector<StatusDevice> devices;
+    for (auto* e : OrderedEntries(true)) devices.push_back(ToStatus(e->st, e->lastPct));
+    WriteStatusSnapshot(devices, "snapshot", LOW_BATTERY);
 }
 
 void Reconcile();
@@ -1992,6 +2023,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (e.icon) DestroyIcon(e.icon);
             }
             if (g_placeholder) TrayDelete(PLACEHOLDER_ID);
+            DeleteFileW(StatusSnapshotPath().c_str());  // so external tools see the app is gone right away
             PostQuitMessage(0);
             return 0;
     }
