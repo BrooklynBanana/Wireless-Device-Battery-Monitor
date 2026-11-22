@@ -383,7 +383,7 @@ IInspectable* FirstItem(IInspectable* resultObj) {
 
 // Battery Level of the speaker's LE side at its current random address, without pairing. -1 on failure.
 // Blocking (several seconds): run off the poll thread.
-int ReadBatteryLevel(ULONGLONG leAddress) {
+int ReadBatteryLevel(ULONGLONG leAddress, int addressType = kAddressTypeRandom, bool settle = true) {
     const wchar_t* cls = L"Windows.Devices.Bluetooth.BluetoothLEDevice";
     HSTRING name = nullptr;
     ILEDeviceStatics2* statics = nullptr;
@@ -406,7 +406,7 @@ int ReadBatteryLevel(ULONGLONG leAddress) {
     // Null until the watcher has heard this address (a fresh one appeared about 1 s after it started).
     for (int i = 0; i < kLookupTries && !device; i++) {
         if (i) Sleep(500);
-        if (SUCCEEDED(statics->FromBluetoothAddressWithTypeAsync(leAddress, kAddressTypeRandom, &op))) device = Await(op, 5000);
+        if (SUCCEEDED(statics->FromBluetoothAddressWithTypeAsync(leAddress, addressType, &op))) device = Await(op, 5000);
         op = nullptr;
     }
     if (device && SUCCEEDED(device->QueryInterface(IID_LEDevice3, (void**)&device3)) && device3 &&
@@ -422,7 +422,8 @@ int ReadBatteryLevel(ULONGLONG leAddress) {
     if (ch) {
         // The first value after connecting can be a placeholder 100%: read again once it has settled.
         auto* c = (IGattCharacteristicAbi*)ch;  // default interface of GattCharacteristic
-        if (ReadLevelOnce(c) >= 0) {
+        level = ReadLevelOnce(c);
+        if (settle && level >= 0) {
             Sleep(kSettleMs);
             level = ReadLevelOnce(c);
         }
@@ -464,6 +465,10 @@ DWORD WINAPI QueryThread(LPVOID) {
 }
 
 }  // namespace
+
+int ReadLeBatteryLevel(UINT64 address, bool randomAddress, bool settle) {
+    return ReadBatteryLevel(address, randomAddress ? kAddressTypeRandom : 0, settle);
+}
 
 void PollMarshall(PollContext& ctx) {
     std::vector<Speaker> speakers = FindConnectedSpeakers();

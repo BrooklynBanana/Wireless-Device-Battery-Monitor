@@ -185,6 +185,7 @@ void PollScyrox(PollContext& ctx);        // Scyrox V12M on its 2.4 GHz receiver
 void PollHeadsetControl(PollContext &ctx); // only if headsetcontrol.exe is installed
 std::wstring HidContainer(const std::wstring& path);  // container id of the physical device behind a HID path
 void PollUnsupported(PollContext& ctx);  // last: wireless mice / keyboards no driver could read, flagged `unsupported`
+void PollArmorX(PollContext& ctx);  // BigBigWon Armor X Pro: level over Bluetooth LE while on its 045E:0B12 dongle
 void PollGenericHid(PollContext &ctx);
 void PollBluetooth(PollContext &ctx);
 void PollXInput(PollContext &ctx);

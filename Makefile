@@ -50,6 +50,10 @@ test: test-update-core test-update-win test-update-signature
 	./build/charge_estimate_test.exe
 	$(CXX) $(CXXFLAGS) tests/status_json_test.cpp src/status_json.cpp -o build/status_json_test.exe
 	./build/status_json_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/armorx_trend_test.cpp -o build/armorx_trend_test.exe
+	./build/armorx_trend_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/kysona_hide_test.cpp -o build/kysona_hide_test.exe
+	./build/kysona_hide_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Isrc tests/airpods_protocol_test.cpp -o build/airpods_protocol_test.exe
 	./build/airpods_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/reading_freshness_test.cpp -o build/reading_freshness_test.exe
