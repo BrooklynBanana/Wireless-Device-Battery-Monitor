@@ -94,6 +94,7 @@ Record battery history =
 Battery tracking = 
 Time since charge = 
 Awake time (rough) = 
+Show estimated time instead of % (when available) =
 Show on the taskbar (icon + percentage) = 
 Show as tray icons = 
 Background behind taskbar text (for transparent taskbars) = 

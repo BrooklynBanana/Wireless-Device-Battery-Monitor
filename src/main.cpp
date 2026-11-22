@@ -61,7 +61,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -99,6 +99,7 @@ int g_chargeLimit = 0;        // "Notify when charged to" 80/85/90%, 0 = off (th
 bool g_shortRuntimeAlert = true;  // "charge today" notification when the time-to-empty is under 12 h (menu option)
 bool g_hoverCard = true;       // card when the mouse rests on a device (off: plain tooltip)
 bool g_hoverChart = true;      // 24-hour chart in that card
+bool g_runtimeWidget = false;  // optionally show estimated remaining hours instead of % in taskbar widget
 std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all", "main" or one monitor id
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
 bool g_stacked = false;      // icon above the percentage (menu option)
@@ -460,6 +461,8 @@ void SaveTaskbarOffset(int px) {
     else RegDeleteKeyValueW(HKEY_CURRENT_USER, kSettingsKey, L"TaskbarOffset");
 }
 void SaveRecordHistory(bool on) { SaveBoolSetting(L"RecordBatteryHistory", on); }
+bool LoadRuntimeWidget() { return LoadBoolSetting(L"EstimatedRuntimeInWidget", false); }
+void SaveRuntimeWidget(bool on) { SaveBoolSetting(L"EstimatedRuntimeInWidget", on); }
 bool LoadWidgetBackground() { return LoadBoolSetting(L"WidgetBackground", false); }
 void SaveWidgetBackground(bool on) { SaveBoolSetting(L"WidgetBackground", on); }
 std::wstring LoadWidgetMonitor() {
@@ -862,7 +865,14 @@ void UpdateWidget() {
         bool offline = !e->st.connected;
         it.percent = offline ? -1 : (e->st.percent >= 0 ? e->st.percent : e->lastPct);
         if (offline) it.text = L"\u00D7";  // clear status, not a stale percentage
-        else if (e->st.percent >= 0) it.text = T(e->st.levelText);
+        else if (e->st.percent >= 0) {
+            // Never present a prediction as a live measurement for asleep, charging or full devices.
+            if (g_runtimeWidget && g_recordHistory && !e->st.asleep &&
+                !e->st.charging && !e->st.full)
+                it.text = battery_history::EstimatedRuntimeText(e->st.key);
+            // Insufficient, stale or otherwise unavailable estimates keep the normal battery readout.
+            if (it.text.empty()) it.text = T(e->st.levelText);
+        }
         it.charging = !offline && !e->st.asleep && e->st.charging;
         it.full = !offline && (e->st.full || (e->st.charging && it.percent >= 100));
         it.dim = ShouldDim(e->st);
@@ -1432,6 +1442,8 @@ void ShowMenu() {
     AppendMenuW(display, MF_STRING | (g_farLeft ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_FAR_LEFT, T(L"At the left end of the taskbar"));
     AppendMenuW(display, MF_STRING | (g_beforeApps ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_BEFORE_APPS,
                 T(L"Just before the taskbar apps"));
+    AppendMenuW(display, MF_STRING | (g_runtimeWidget ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_RUNTIME_WIDGET,
+                T(L"Show estimated time instead of % (when available)"));
     // With more than one monitor: choose which taskbars show the widget (all, main only, or one monitor).
     auto monitors = widget::OtherMonitors();
     if (monitors.size() > 31) monitors.resize(31);
@@ -1554,7 +1566,7 @@ void ShowMenu() {
         case ID_TRAY_WHEN_EMPTY: SetTrayWhenEmpty(!g_trayWhenEmpty); break;
         case ID_SHOW_DISCONNECTED: SetShowDisconnectedDevices(!g_showDisconnectedDevices); break;
         case ID_DIM_SLEEPING: SetDimSleeping(!g_dimSleeping); break;
-        case ID_RECORD_HISTORY: g_recordHistory = !g_recordHistory; SaveRecordHistory(g_recordHistory); break;
+        case ID_RECORD_HISTORY: g_recordHistory = !g_recordHistory; SaveRecordHistory(g_recordHistory); UpdateWidget(); break;
         case ID_LIMIT_OFF: SetChargeLimit(0); break;
         case ID_SHORT_RUNTIME_ALERT: g_shortRuntimeAlert = !g_shortRuntimeAlert; SaveBoolSetting(L"ShortRuntimeAlert", g_shortRuntimeAlert); break;
         case ID_HOVER_CARD:
@@ -1567,6 +1579,7 @@ void ShowMenu() {
         case ID_TRACK_SINCE: SetTrackSince(!g_trackSince); break;
         case ID_TRACK_AWAKE: SetTrackAwake(!g_trackAwake); break;
         case ID_TRACK_EMPTY: SetTrackEmpty(!g_trackEmpty); break;
+        case ID_RUNTIME_WIDGET: g_runtimeWidget = !g_runtimeWidget; SaveRuntimeWidget(g_runtimeWidget); UpdateWidget(); break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MONITOR_ALL: SetWidgetMonitor(L"all"); break;
         case ID_LANG_AUTO: SetLanguage(L""); break;
@@ -2079,6 +2092,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_trackSince = LoadTrackSince();
     g_trackAwake = LoadTrackAwake();
     g_trackEmpty = LoadTrackEmpty();
+    g_runtimeWidget = LoadRuntimeWidget();
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();
     g_stacked = LoadStacked();
