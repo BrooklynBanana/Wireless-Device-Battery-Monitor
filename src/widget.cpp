@@ -11,6 +11,7 @@
 namespace {
 
 HWND g_wnd, g_taskbar, g_tip, g_notify, g_rebar;
+bool g_cardOn = true, g_chartOn = true;  // hover card and its 24-hour chart (menu options); card off = plain tooltip
 UINT g_clickMsg;
 bool g_light, g_hover;
 bool g_background;  // opaque rounded plate behind the text, for transparent / restyled taskbars
@@ -42,6 +43,7 @@ struct Mirror {
     SIZE size{};
     int dpi = 0;
     int lastLeft = INT_MIN;  // client x it was last placed at; INT_MIN = not placed (hidden)
+    std::vector<RECT> itemRects;  // each device's area in this strip (for the hover card)
 };
 std::vector<Mirror> g_mirrors;
 // Which taskbars show the strip: "all", "main", or one monitor's id (MonitorId), e.g. only monitor 3.
@@ -610,6 +612,7 @@ struct Piece {
     Mask halo;        // glow drawn behind the glyph (branded devices)
     int haloR = 0, haloAlpha = 0;
     int px = INT_MIN, py = 0;  // fixed top-left position (stacked and vertical layouts); INT_MIN = flow left to right
+    int item = -1;    // index in g_items of the device this piece belongs to (finds the device under the mouse)
 };
 
 // Coverage masks for a ring of diameter d (PR #110): the full circle (track) and the arc that starts at
@@ -680,6 +683,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
             glyph.bx = (d - glyph.m.w) / 2;
             glyph.by = (d - glyph.m.h) / 2;
             out.push_back(std::move(glyph));
+            for (size_t k = (size_t)base; k < out.size(); k++) out[k].item = (int)i;  // the hover card finds it
             continue;
         }
         Rgb tc = it.low ? red : fg;
@@ -714,6 +718,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
             c.by = out[glyph].m.h - c.m.h + Px(3);
             out.push_back(c);
         }
+        for (size_t k = glyph; k < out.size(); k++) out[k].item = (int)i;
     }
     DeleteObject(icons);
     DeleteObject(bolt);
@@ -792,9 +797,13 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     return out;
 }
 
+// Each device's area in a strip (client coordinates), from the last paint: the primary strip's, and each
+// mirror keeps its own. Neighbouring areas meet halfway between devices, so there is no dead gap.
+std::vector<RECT> g_itemRects;
+
 // Draws the strip for one window: the primary one or a mirror on a secondary taskbar.
 // Returns true only when the layered surface was updated with a valid non-empty size.
-bool PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
+bool PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size, std::vector<RECT>& itemRects) {
     if (!wnd || !taskbar || !IsWindow(wnd) || !IsWindow(taskbar)) return false;
     RECT bar{};
     if (!GetClientRect(taskbar, &bar)) return false;
@@ -856,6 +865,39 @@ bool PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
         cv.Draw(p.m, xs[i], ys[i], p.color, p.alpha);
     }
 
+    // Where each device sits, for the hover card: the span of its pieces, widened to meet its neighbours.
+    itemRects.assign(g_items.size(), RECT{ INT_MAX, INT_MAX, INT_MIN, INT_MIN });
+    for (size_t i = 0; i < pieces.size(); i++) {
+        int k = pieces[i].item;
+        if (k < 0 || k >= (int)itemRects.size()) continue;
+        RECT& r = itemRects[k];
+        r.left = std::min(r.left, (LONG)xs[i]);
+        r.top = std::min(r.top, (LONG)ys[i]);
+        r.right = std::max(r.right, (LONG)(xs[i] + pieces[i].m.w));
+        r.bottom = std::max(r.bottom, (LONG)(ys[i] + pieces[i].m.h));
+    }
+    for (size_t k = 0; k < itemRects.size(); k++) {
+        RECT& r = itemRects[k];
+        if (r.left > r.right) { r = RECT{}; continue; }
+        if (g_vertical) {  // devices one under the other: full width, split the height
+            r.left = 0;
+            r.right = W;
+            r.top = k == 0 ? 0 : (itemRects[k - 1].bottom + r.top) / 2;
+        } else {
+            r.top = 0;
+            r.bottom = H;
+            r.left = k == 0 ? 0 : (itemRects[k - 1].right + r.left) / 2;
+        }
+    }
+    for (size_t k = 0; k + 1 < itemRects.size(); k++) {
+        if (g_vertical) itemRects[k].bottom = itemRects[k + 1].top;
+        else itemRects[k].right = itemRects[k + 1].left;
+    }
+    if (!itemRects.empty()) {
+        if (g_vertical) itemRects.back().bottom = H;
+        else itemRects.back().right = W;
+    }
+
     HDC screen = GetDC(nullptr);
     if (!screen) return false;
     HDC mem = CreateCompatibleDC(screen);
@@ -890,7 +932,7 @@ bool PaintStrip(HWND wnd, HWND taskbar, bool hover, SIZE& size) {
 void Paint() {
     if (!g_wnd) return;
     RECT client{};
-    g_painted = PaintStrip(g_wnd, g_taskbar, g_hover, g_size);
+    g_painted = PaintStrip(g_wnd, g_taskbar, g_hover, g_size, g_itemRects);
     if (g_painted && GetClientRect(g_taskbar, &client)) {
         g_paintedBarClient = { client.right - client.left, client.bottom - client.top };
     } else {
@@ -903,7 +945,7 @@ void Paint() {
 void PaintMirror(Mirror& m) {
     g_dpiBar = m.bar;
     m.dpi = Dpi();
-    m.painted = PaintStrip(m.wnd, m.bar, m.hover, m.size);
+    m.painted = PaintStrip(m.wnd, m.bar, m.hover, m.size, m.itemRects);
     if (!m.painted) m.size = {};
     g_dpiBar = nullptr;
     m.lastLeft = INT_MIN;  // force a re-position with the new size
@@ -1048,14 +1090,23 @@ void PositionMirror(Mirror& m) {
     SetWindowPos(m.wnd, HWND_TOP, x, v ? p.y : 0, m.size.cx, m.size.cy, SWP_NOACTIVATE | SWP_SHOWWINDOW);
 }
 
-void AddTool(HWND w) {
+// The summary text is the strip's window name, so screen readers still read the levels.
+// The summary text is the strip's window name (read by screen readers) and the plain tooltip's text, which is
+// shown instead of the card when the card is turned off.
+void SetSummary(HWND w) {
+    const wchar_t* text = g_tipText.empty() ? L"BatteryHub" : g_tipText.c_str();
+    SetWindowTextW(w, text);
     if (!g_tip) return;
     TTTOOLINFOW ti{ sizeof(ti) };
     ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
     ti.hwnd = g_notify;
     ti.uId = (UINT_PTR)w;
-    ti.lpszText = const_cast<wchar_t*>(g_tipText.empty() ? L"BatteryHub" : g_tipText.c_str());
-    SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+    ti.lpszText = const_cast<wchar_t*>(text);
+    TTTOOLINFOW probe{ sizeof(probe) };
+    probe.hwnd = g_notify;
+    probe.uId = (UINT_PTR)w;
+    bool known = SendMessageW(g_tip, TTM_GETTOOLINFOW, 0, (LPARAM)&probe) != 0;
+    SendMessageW(g_tip, known ? TTM_UPDATETIPTEXTW : TTM_ADDTOOLW, 0, (LPARAM)&ti);
 }
 
 void DestroyMirror(Mirror& m) {
@@ -1176,7 +1227,7 @@ void SyncMirrors() {
         m.wnd = CreateWindowExW(WS_EX_LAYERED | WS_EX_NOACTIVATE, kClass, L"", WS_CHILD | WS_CLIPSIBLINGS, 0, 0, 1, 1, b, nullptr,
                                 g_inst, nullptr);
         if (!m.wnd) continue;
-        AddTool(m.wnd);
+        SetSummary(m.wnd);
         g_mirrors.push_back(m);
         PaintMirror(g_mirrors.back());
     }
@@ -1187,6 +1238,345 @@ void SyncMirrors() {
 void PaintAll() {
     Paint();
     for (auto& m : g_mirrors) PaintMirror(m);
+}
+
+// ---- hover card ----------------------------------------------------------------------------------
+// Resting the mouse on a device opens a small card above it, in the style of the Windows 11 flyouts: the
+// device's icon and name, its level in large type with a coloured bar, then a few lines (charging / asleep,
+// estimated time to empty, connection). It replaces the plain tooltip, follows the light / dark theme and
+// the taskbar's DPI, and lets the mouse through (it never takes focus or clicks).
+HWND g_card;
+int g_cardItem = -1;   // device shown in the card; -1 = hidden, kCardMessage = the "no devices" text
+HWND g_cardStrip;      // strip the card was opened from (primary or a mirror)
+int g_hoverItem = -1;  // device under the mouse
+constexpr int kCardMessage = -2;
+constexpr UINT_PTR kCardTimer = 1;
+constexpr UINT kCardDelayMs = 400;
+const wchar_t* kCardClass = L"WirelessBatteryCard";
+
+const std::vector<RECT>* RectsOf(HWND strip) {
+    if (strip == g_wnd) return &g_itemRects;
+    for (auto& m : g_mirrors)
+        if (m.wnd == strip) return &m.itemRects;
+    return nullptr;
+}
+
+int ItemAt(HWND strip, POINT p) {
+    if (g_items.empty()) return kCardMessage;
+    const auto* rects = RectsOf(strip);
+    if (!rects) return -1;
+    for (size_t i = 0; i < rects->size(); i++)
+        if (PtInRect(&(*rects)[i], p)) return (int)i;
+    return -1;
+}
+
+// A line of text at its full cell height (RenderMask crops to the ink), so lines line up on a baseline.
+Mask RenderLine(const std::wstring& s, HFONT font) {
+    Mask m;
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, font);
+    SIZE sz{};
+    GetTextExtentPoint32W(dc, s.c_str(), (int)s.size(), &sz);
+    if (sz.cx > 0 && sz.cy > 0) {
+        int W = sz.cx + 2, H = sz.cy;
+        BITMAPINFO bi{};
+        bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
+        void* bits = nullptr;
+        HBITMAP bmp = CreateDIBSection(dc, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        HGDIOBJ ob = SelectObject(dc, bmp);
+        memset(bits, 0, (size_t)W * H * 4);
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutW(dc, 0, 0, s.c_str(), (int)s.size());
+        GdiFlush();
+        auto* p = static_cast<DWORD*>(bits);
+        m.w = W;
+        m.h = H;
+        m.a.resize((size_t)W * H);
+        for (int i = 0; i < W * H; i++) m.a[i] = (BYTE)(((p[i] & 0xFF) + ((p[i] >> 8) & 0xFF) + ((p[i] >> 16) & 0xFF)) / 3);
+        SelectObject(dc, ob);
+        DeleteObject(bmp);
+    }
+    SelectObject(dc, of);
+    DeleteDC(dc);
+    return m;
+}
+
+// Shortens `s` with an ellipsis until it fits in `maxW` pixels.
+std::wstring Fit(std::wstring s, HFONT font, int maxW) {
+    HDC dc = CreateCompatibleDC(nullptr);
+    HGDIOBJ of = SelectObject(dc, font);
+    auto width = [&](const std::wstring& t) { SIZE z{}; GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &z); return (int)z.cx; };
+    if (width(s) > maxW) {
+        while (s.size() > 1 && width(s + L"…") > maxW) s.pop_back();
+        s += L"…";
+    }
+    SelectObject(dc, of);
+    DeleteDC(dc);
+    return s;
+}
+
+// Rounded rectangle with anti-aliased corners.
+void FillRound(Canvas& cv, int x0, int y0, int w, int h, int r, Rgb c, int alpha) {
+    for (int y = y0; y < y0 + h; y++)
+        for (int x = x0; x < x0 + w; x++) {
+            double dx = x < x0 + r ? x0 + r - (x + 0.5) : (x >= x0 + w - r ? (x + 0.5) - (x0 + w - r) : 0);
+            double dy = y < y0 + r ? y0 + r - (y + 0.5) : (y >= y0 + h - r ? (y + 0.5) - (y0 + h - r) : 0);
+            double cover = (dx > 0 && dy > 0) ? std::min(1.0, std::max(0.0, r - std::sqrt(dx * dx + dy * dy) + 0.5)) : 1.0;
+            if (cover > 0) cv.Blend(x, y, c, (int)(alpha * cover));
+        }
+}
+
+void HideCard() {
+    g_cardItem = -1;
+    if (g_card) ShowWindow(g_card, SW_HIDE);
+}
+
+void ShowCard(HWND strip, int item) {
+    const auto* rects = RectsOf(strip);
+    bool message = item == kCardMessage;
+    if (!rects || (!message && (item < 0 || item >= (int)g_items.size() || item >= (int)rects->size()))) {
+        HideCard();
+        return;
+    }
+    if (!g_card) {
+        static bool registered = false;
+        if (!registered) {
+            WNDCLASSEXW wc{ sizeof(wc) };
+            wc.lpfnWndProc = DefWindowProcW;
+            wc.hInstance = g_inst;
+            wc.lpszClassName = kCardClass;
+            registered = RegisterClassExW(&wc) != 0;
+        }
+        g_card = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, kCardClass, L"",
+                                 WS_POPUP, 0, 0, 1, 1, g_notify, nullptr, g_inst, nullptr);
+        if (!g_card) return;
+    }
+    HWND bar = GetParent(strip);
+    g_dpiBar = bar;  // Px() at the DPI of the monitor the strip is on
+
+    Rgb bg = g_light ? Rgb{ 249, 249, 249 } : Rgb{ 44, 44, 44 };
+    Rgb border = g_light ? Rgb{ 222, 222, 222 } : Rgb{ 66, 66, 66 };
+    Rgb fg = g_light ? Rgb{ 27, 27, 27 } : Rgb{ 242, 242, 242 };
+    Rgb sub = g_light ? Rgb{ 96, 96, 96 } : Rgb{ 170, 170, 170 };
+    Rgb track = g_light ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 };
+    Rgb red = g_light ? Rgb{ 196, 30, 40 } : Rgb{ 255, 90, 90 };
+    Rgb charge = g_light ? Rgb{ 0, 120, 212 } : Rgb{ 96, 205, 255 };
+    Rgb green = g_light ? Rgb{ 16, 124, 16 } : Rgb{ 108, 203, 95 };
+    HFONT icons = MakeFont(Px(18), FW_NORMAL, L"Segoe Fluent Icons", L"Segoe MDL2 Assets");
+    HFONT title = MakeFont(Px(14), FW_SEMIBOLD, L"Segoe UI Variable Text", L"Segoe UI");
+    HFONT big = MakeFont(Px(28), FW_SEMIBOLD, L"Segoe UI Variable Display", L"Segoe UI");
+    HFONT body = MakeFont(Px(12), FW_NORMAL, L"Segoe UI Variable Text", L"Segoe UI");
+
+    const int pad = Px(16), minW = Px(240), maxW = Px(380), textMax = maxW - 2 * pad;
+    struct Line { Mask m; Rgb c; int x, y; };
+    std::vector<Line> lines;
+    Mask glyph;
+    int W = minW, y = pad, barY = -1, pct = -1, barAlpha = 255, chartY = -1, chartNow = -1, axisY = 0;
+    double forecastHours = -1;
+    std::vector<std::pair<long long, int>> chart;
+    Mask axisLeft, axisNow, axisEnd;
+    Rgb barColor = fg;
+    if (message) {
+        size_t start = 0;
+        while (start <= g_tipText.size()) {
+            size_t end = g_tipText.find(L'\n', start);
+            std::wstring t = g_tipText.substr(start, end == std::wstring::npos ? std::wstring::npos : end - start);
+            Mask m = RenderLine(Fit(t, body, textMax), body);
+            W = std::max(W, m.w + 2 * pad);
+            lines.push_back({ std::move(m), fg, pad, y });
+            y += lines.back().m.h + Px(2);
+            if (end == std::wstring::npos) break;
+            start = end + 1;
+        }
+        y += pad - Px(2);
+    } else {
+        const WidgetItem& it = g_items[item];
+        // icon + name
+        glyph = RenderMask(std::wstring(1, Glyph(it.kind, it.bluetooth)), icons, false);
+        int nameX = pad + glyph.w + Px(10);
+        Mask name = RenderLine(Fit(it.name, title, maxW - pad - nameX), title);
+        int rowH = std::max(glyph.h, name.h);
+        W = std::max(W, nameX + name.w + pad);
+        int nameY = y + (rowH - name.h) / 2;
+        lines.push_back({ std::move(name), fg, nameX, nameY });
+        int glyphY = y + (rowH - glyph.h) / 2;
+        y += rowH + Px(8);
+        // big level, with the state next to it
+        std::wstring level = !it.text.empty() ? it.text : it.percent >= 0 ? std::to_wstring(it.percent) + L"%" : L"?";
+        Mask lv = RenderLine(level, big);
+        int lvY = y;
+        W = std::max(W, lv.w + 2 * pad);
+        Rgb levelColor = it.low ? red : fg;
+        lines.push_back({ std::move(lv), levelColor, pad, lvY });
+        y += lines.back().m.h + Px(4);
+        // level bar
+        pct = it.percent;
+        barAlpha = it.dim ? 150 : 255;  // asleep / last known value: same colours, a little faded
+        barColor = it.low ? red : it.charging ? charge : it.full ? green
+                 : it.accent != Accent::None ? Rgb{ AccentColor(it.accent, g_light).r, AccentColor(it.accent, g_light).g, AccentColor(it.accent, g_light).b }
+                 : green;
+        barY = y;
+        y += Px(6) + Px(12);
+        // status and extra lines
+        std::vector<std::wstring> rest;
+        if (!it.status.empty()) rest.push_back(it.status);
+        rest.insert(rest.end(), it.info.begin(), it.info.end());
+        for (const auto& t : rest) {
+            Mask m = RenderLine(Fit(t, body, textMax), body);
+            W = std::max(W, m.w + 2 * pad);
+            lines.push_back({ std::move(m), sub, pad, y });
+            y += lines.back().m.h + Px(2);
+        }
+        // chart: the recorded levels of the last 24 hours, then the forecast down to empty (dashed)
+        forecastHours = it.percent > 0 ? it.hoursLeft : -1;
+        if (g_chartOn && it.percent >= 0 && (!it.trend.empty() || forecastHours > 0)) {
+            y += Px(8);
+            Mask cap = RenderLine(T(forecastHours > 0 ? L"Last 24 hours and forecast" : L"Last 24 hours"), body);
+            lines.push_back({ std::move(cap), sub, pad, y });
+            y += lines.back().m.h + Px(6);
+            chartY = y;
+            chart = it.trend;
+            chartNow = it.percent;
+            y += Px(56) + Px(4);
+            axisLeft = RenderLine(T(L"24h ago"), body);
+            axisNow = RenderLine(T(L"Now"), body);
+            if (forecastHours > 0) axisEnd = RenderLine(it.hoursLeftText, body);
+            axisY = y;
+            y += axisLeft.h;
+        }
+        y += pad - Px(2);
+        // the icon goes first, drawn in the device's colour like the strip
+        lines.insert(lines.begin(), Line{ std::move(glyph), it.accent != Accent::None
+                                              ? Rgb{ AccentColor(it.accent, g_light).r, AccentColor(it.accent, g_light).g, AccentColor(it.accent, g_light).b }
+                                              : fg, pad, glyphY });
+    }
+    W = std::min(W, maxW);
+    int H = y;
+    DeleteObject(icons);
+    DeleteObject(title);
+    DeleteObject(big);
+    DeleteObject(body);
+
+    Canvas cv(W, H);
+    int radius = Px(8);
+    FillRound(cv, 0, 0, W, H, radius, border, 255);
+    FillRound(cv, 1, 1, W - 2, H - 2, std::max(1, radius - 1), bg, 255);
+    if (barY >= 0) {
+        int bw = W - 2 * pad, bh = Px(6);
+        FillRound(cv, pad, barY, bw, bh, bh / 2, track, g_light ? 28 : 40);
+        if (pct > 0) FillRound(cv, pad, barY, std::max(bh, bw * std::min(pct, 100) / 100), bh, bh / 2, barColor, barAlpha);
+    }
+    if (chartY >= 0) {
+        // Time runs left to right: the last 24 hours, "now", then (when there is an estimate) the forecast down
+        // to 0%. The past takes 45% of the width when a forecast is shown, so "now" never gets squeezed.
+        const int cx = pad, cw = W - 2 * pad, ch = Px(56);
+        const double past = 24.0 * 3600.0, maxFuture = 90.0 * 24 * 3600.0;  // the forecast side has its own width
+        const double future = forecastHours > 0 ? std::min(forecastHours * 3600.0, maxFuture) : 0;
+        const double pastW = future > 0 ? (cw - 1) * 0.45 : (cw - 1);
+        auto X = [&](double t) {  // t: seconds from now (negative = past)
+            return t <= 0 ? cx + (1.0 + std::max(t, -past) / past) * pastW : cx + pastW + std::min(t, future) / future * ((cw - 1) - pastW);
+        };
+        auto Y = [&](double p) { return chartY + (100.0 - std::max(0.0, std::min(p, 100.0))) / 100.0 * (ch - 1); };
+        for (int yy : { chartY, chartY + ch / 2, chartY + ch - 1 })  // faint 100% / 50% / 0% guides
+            for (int xx = cx; xx < cx + cw; xx++) cv.Blend(xx, yy, track, g_light ? 18 : 24);
+        const int nowX = (int)std::lround(X(0));
+        for (int yy = chartY; yy < chartY + ch; yy += 3) cv.Blend(nowX, yy, track, g_light ? 50 : 70);  // "now"
+        auto dot = [&](double fx, double fy, int alpha) {  // anti-aliased point, for 2 px lines
+            int x0 = (int)std::floor(fx), y0 = (int)std::floor(fy);
+            double ax = fx - x0, ay = fy - y0;
+            cv.Blend(x0, y0, barColor, (int)(alpha * (1 - ax) * (1 - ay)));
+            cv.Blend(x0 + 1, y0, barColor, (int)(alpha * ax * (1 - ay)));
+            cv.Blend(x0, y0 + 1, barColor, (int)(alpha * (1 - ax) * ay));
+            cv.Blend(x0 + 1, y0 + 1, barColor, (int)(alpha * ax * ay));
+        };
+        auto line = [&](double x1, double y1, double x2, double y2, int alpha, bool dashed, bool area) {
+            if (area)
+                for (int xx = (int)std::ceil(x1); xx <= (int)std::floor(x2); xx++) {
+                    double k = x2 > x1 ? (xx - x1) / (x2 - x1) : 0;
+                    for (int yy = (int)std::ceil(y1 + (y2 - y1) * k); yy < chartY + ch; yy++) cv.Blend(xx, yy, barColor, g_light ? 30 : 40);
+                }
+            double len = std::max(1.0, std::hypot(x2 - x1, y2 - y1));
+            for (double s = 0; s <= len; s += 0.25) {
+                if (dashed && std::fmod(s, (double)Px(7)) > Px(4)) continue;
+                double fx = x1 + (x2 - x1) * s / len, fy = y1 + (y2 - y1) * s / len;
+                dot(fx, fy - 0.5, alpha);
+                dot(fx, fy + 0.5, alpha);
+            }
+        };
+        auto disc = [&](double fx, double fy, int r, int alpha) {
+            for (int yy = -r; yy <= r; yy++)
+                for (int xx = -r; xx <= r; xx++)
+                    if (xx * xx + yy * yy <= r * r + 1) cv.Blend((int)std::lround(fx) + xx, (int)std::lround(fy) + yy, barColor, alpha);
+        };
+        // the past: recorded readings joined when less than 12 hours apart (a mouse asleep overnight is not a gap), up to now
+        std::vector<std::pair<double, double>> pts;
+        for (const auto& c : chart) pts.push_back({ (double)c.first, (double)c.second });
+        pts.push_back({ 0.0, (double)chartNow });
+        for (size_t i = 0; i + 1 < pts.size(); i++) {
+            if (pts[i + 1].first - pts[i].first > 12 * 3600) { disc(X(pts[i].first), Y(pts[i].second), 1, 200); continue; }
+            line(X(pts[i].first), Y(pts[i].second), X(pts[i + 1].first), Y(pts[i + 1].second), 110, false, false);
+        }
+        // the forecast: a dashed line from now down to empty
+        if (future > 0) {
+            double endPct = chartNow * (1.0 - future / (forecastHours * 3600.0));
+            line(X(0), Y(chartNow), X(future), Y(endPct), 90, true, false);
+            disc(X(future), Y(endPct), Px(2), 140);
+        }
+        disc(X(0), Y(chartNow), Px(2) + 1, 255);  // the current level
+        // axis labels: "24h ago" at the left, "Now" under the marker, the time to empty at the right
+        lines.push_back({ std::move(axisLeft), sub, cx, axisY });
+        int nowLabelX = std::max(cx, std::min(nowX - axisNow.w / 2, cx + cw - axisNow.w));
+        if (future > 0) nowLabelX = std::max(nowLabelX, cx + lines.back().m.w + Px(6));
+        int endX = cx + cw - axisEnd.w;
+        if (future > 0 && axisEnd.w > 0) nowLabelX = std::min(nowLabelX, endX - axisNow.w - Px(6));
+        if (future > 0 || nowX > cx + lines.back().m.w + Px(6)) lines.push_back({ std::move(axisNow), sub, nowLabelX, axisY });
+        if (future > 0 && axisEnd.w > 0) lines.push_back({ std::move(axisEnd), fg, endX, axisY });
+    }
+    for (const auto& l : lines) cv.Draw(l.m, l.x, l.y, l.c, 255);
+
+    // Above the device (below it for a top taskbar, beside it for a left / right one), kept on its monitor.
+    RECT ir{};
+    if (message) GetClientRect(strip, &ir);
+    else ir = (*rects)[item];
+    MapWindowPoints(strip, nullptr, reinterpret_cast<POINT*>(&ir), 2);
+    RECT br{};
+    GetWindowRect(bar, &br);
+    MONITORINFO mi{ sizeof(mi) };
+    GetMonitorInfoW(MonitorFromWindow(bar, MONITOR_DEFAULTTONEAREST), &mi);
+    const RECT& mon = mi.rcMonitor;
+    int gap = Px(8), x, top;
+    bool vertical = br.bottom - br.top > br.right - br.left;
+    if (vertical) {
+        top = (ir.top + ir.bottom) / 2 - H / 2;
+        x = br.left - mon.left < mon.right - br.right ? br.right + gap : br.left - gap - W;
+    } else {
+        x = (ir.left + ir.right) / 2 - W / 2;
+        top = br.top - mon.top > mon.bottom - br.bottom ? br.top - gap - H : br.bottom + gap;
+    }
+    x = std::max((int)mon.left + gap, std::min(x, (int)mon.right - gap - W));
+    top = std::max((int)mon.top + gap, std::min(top, (int)mon.bottom - gap - H));
+    g_dpiBar = nullptr;
+
+    HDC screen = GetDC(nullptr);
+    HDC mem = CreateCompatibleDC(screen);
+    BITMAPINFO bi{};
+    bi.bmiHeader = { sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB };
+    void* bits = nullptr;
+    HBITMAP bmp = CreateDIBSection(mem, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    memcpy(bits, cv.px.data(), (size_t)W * H * 4);
+    HGDIOBJ ob = SelectObject(mem, bmp);
+    SIZE sz{ W, H };
+    POINT src{ 0, 0 }, dst{ x, top };
+    BLENDFUNCTION bf{ AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    UpdateLayeredWindow(g_card, screen, &dst, &sz, mem, &src, 0, &bf, ULW_ALPHA);
+    SelectObject(mem, ob);
+    DeleteObject(bmp);
+    DeleteDC(mem);
+    ReleaseDC(nullptr, screen);
+    SetWindowPos(g_card, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    g_cardItem = item;
+    g_cardStrip = strip;
 }
 
 // Hover highlight for the strip under the mouse: the primary one or a mirror.
@@ -1212,13 +1602,37 @@ LRESULT CALLBACK WidgetProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             TRACKMOUSEEVENT t{ sizeof(t), TME_LEAVE, h, 0 };
             TrackMouseEvent(&t);
             SetHover(h, true);
+            if (!g_cardOn) return 0;  // card turned off: the plain tooltip shows the summary instead
+            POINT p{ (short)LOWORD(lp), (short)HIWORD(lp) };
+            int k = ItemAt(h, p);
+            if (k != g_hoverItem || h != g_cardStrip) {
+                g_hoverItem = k;
+                if (g_cardItem != -1 && k != -1) {
+                    ShowCard(h, k);  // already open: follow the mouse to the next device right away
+                } else {
+                    KillTimer(h, kCardTimer);
+                    if (k == -1) HideCard();
+                    else SetTimer(h, kCardTimer, kCardDelayMs, nullptr);
+                }
+            }
             return 0;
         }
+        case WM_TIMER:
+            if (wp == kCardTimer) {
+                KillTimer(h, kCardTimer);
+                if (g_hoverItem != -1) ShowCard(h, g_hoverItem);
+            }
+            return 0;
         case WM_MOUSELEAVE:
             SetHover(h, false);
+            KillTimer(h, kCardTimer);
+            g_hoverItem = -1;
+            HideCard();
             return 0;
         case WM_LBUTTONUP:
         case WM_RBUTTONUP:
+            KillTimer(h, kCardTimer);
+            HideCard();
             PostMessageW(g_notify, g_clickMsg, 0, 0);
             return 0;
         case WM_MOUSEACTIVATE:
@@ -1269,14 +1683,10 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme) {
                             notifyWnd, nullptr, inst, nullptr);
     if (g_tip) {
         ApplyTipTheme();
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
-        ti.hwnd = notifyWnd;
-        ti.uId = (UINT_PTR)g_wnd;
-        ti.lpszText = const_cast<wchar_t*>(L"BatteryHub");
-        SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
         SendMessageW(g_tip, TTM_SETMAXTIPWIDTH, 0, 600);
+        SendMessageW(g_tip, TTM_ACTIVATE, !g_cardOn, 0);  // the card replaces it while the card is on
     }
+    SetSummary(g_wnd);
     WatchWidgetsButton(g_taskbar);
     g_lastDpi = Dpi();
     Paint();
@@ -1300,7 +1710,10 @@ void Destroy() {
     SetMeasureMirrors(false);
     g_primaryHidden = false;  // the next Create() decides again
     if (g_wbWake) WatchWidgetsButton(nullptr);
+    if (g_card) { DestroyWindow(g_card); g_card = nullptr; }
     if (g_tip) { DestroyWindow(g_tip); g_tip = nullptr; }
+    g_cardItem = g_hoverItem = -1;
+    g_cardStrip = nullptr;
     if (g_wnd) { DestroyWindow(g_wnd); g_wnd = nullptr; }
     g_taskbar = nullptr;
     g_hover = false;
@@ -1313,26 +1726,32 @@ bool Alive() { return g_wnd && IsWindow(g_wnd) && g_taskbar && IsWindow(g_taskba
 
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip) {
     g_items = items;
-    if (tooltip != g_tipText && g_tip) {
+    if (tooltip != g_tipText) {
         g_tipText = tooltip;
-        TTTOOLINFOW ti{ sizeof(ti) };
-        ti.hwnd = g_notify;
-        ti.lpszText = const_cast<wchar_t*>(g_tipText.c_str());
-        ti.uId = (UINT_PTR)g_wnd;
-        SendMessageW(g_tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
-        for (const auto& m : g_mirrors) {
-            ti.uId = (UINT_PTR)m.wnd;
-            SendMessageW(g_tip, TTM_UPDATETIPTEXTW, 0, (LPARAM)&ti);
-        }
+        if (g_wnd) SetSummary(g_wnd);
+        for (const auto& m : g_mirrors) SetSummary(m.wnd);
     }
     PaintAll();
     Reposition();
+    if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) {  // keep an open card up to date
+        if (g_cardItem == kCardMessage ? g_items.empty() : g_cardItem < (int)g_items.size()) ShowCard(g_cardStrip, g_cardItem);
+        else HideCard();
+    }
+}
+
+void SetCardOptions(bool card, bool chart) {
+    g_cardOn = card;
+    g_chartOn = chart;
+    if (g_tip) SendMessageW(g_tip, TTM_ACTIVATE, !card, 0);
+    if (!card) HideCard();
+    else if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) ShowCard(g_cardStrip, g_cardItem);
 }
 
 void SetLightTheme(bool light) {
     g_light = light;
     ApplyTipTheme();
     PaintAll();
+    if (g_cardItem != -1 && g_cardStrip && IsWindow(g_cardStrip)) ShowCard(g_cardStrip, g_cardItem);
 }
 
 void SetBackground(bool on) {

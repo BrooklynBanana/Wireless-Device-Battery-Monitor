@@ -20,6 +20,14 @@ struct WidgetItem {
     bool wirelessLink = false;  // on a 2.4 GHz receiver: small wireless mark after the level (opt-in, PR #2277)
     std::wstring label;      // tiny caption on the icon; set only when two devices of one kind are shown
     Accent accent  = Accent::None;  // brand color for the icon, its glow and the level bar
+    // Shown in the card that opens when the mouse rests on this device in the strip.
+    std::wstring name;               // display name (custom name when renamed)
+    std::wstring status;             // "49%, charging", "asleep" ...
+    std::vector<std::wstring> info;  // extra lines: estimated time to empty, connection
+    // Recorded levels of the last 24 hours for the card's small chart: {seconds ago (<= 0), percent}.
+    std::vector<std::pair<long long, int>> trend;
+    double hoursLeft = -1;      // estimated time to empty (the chart's dashed forecast), -1 = none
+    std::wstring hoursLeftText; // the same, formatted ("~3 d 4 h")
 };
 
 namespace widget {
@@ -30,6 +38,9 @@ bool Create(HINSTANCE inst, HWND notifyWnd, UINT clickMsg, bool lightTheme);
 void Destroy();
 bool Alive();
 void SetItems(const std::vector<WidgetItem>& items, const std::wstring& tooltip);
+// The card shown when the mouse rests on a device (on by default), and its 24-hour chart (on by default).
+// With the card off, the summary is shown as a plain tooltip instead.
+void SetCardOptions(bool card, bool chart);
 void SetLightTheme(bool light);
 // Draws a rounded plate in the taskbar's colours behind the text (kept across Create/Destroy).
 void SetBackground(bool on);

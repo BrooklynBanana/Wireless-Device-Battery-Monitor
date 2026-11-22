@@ -15,6 +15,7 @@
 #include <cstring>
 #include <ctime>
 #include <cwchar>
+#include <cwctype>
 #include <map>
 #include <set>
 #include <string>
@@ -60,7 +61,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -96,6 +97,8 @@ bool g_dimSleeping = true;  // dim a sleeping device's last known value (menu op
 bool g_recordHistory = true;  // save readings for "Battery history..." (menu option, on by default)
 int g_chargeLimit = 0;        // "Notify when charged to" 80/85/90%, 0 = off (the default)
 bool g_shortRuntimeAlert = true;  // "charge today" notification when the time-to-empty is under 12 h (menu option)
+bool g_hoverCard = true;       // card when the mouse rests on a device (off: plain tooltip)
+bool g_hoverChart = true;      // 24-hour chart in that card
 std::wstring g_widgetMonitor = L"all";  // which taskbars show the widget: "all", "main" or one monitor id
 bool g_widgetBackground = false;  // draw a plate behind the taskbar text (transparent taskbar themes)
 bool g_stacked = false;      // icon above the percentage (menu option)
@@ -799,6 +802,32 @@ void UpdateWidget() {
         it.wirelessLink = !offline && e->st.via.rfind(L"2.4 GHz", 0) == 0;
         it.label = labels[items.size()];
         it.accent = AccentFor(e->st);
+        it.name = DisplayName(*e);
+        {   // the card shows the level in large type already: here only the state, e.g. "Charging", "Asleep"
+            std::vector<std::wstring> parts;
+            if (offline) parts.push_back(T(L"off / not connected"));
+            else {
+                if (!e->st.detail.empty() && e->st.percent >= 0) parts.push_back(e->st.detail);
+                if (it.full) parts.push_back(T(L"fully charged"));
+                else if (it.charging) parts.push_back(T(L"charging"));
+                if (e->st.asleep) parts.push_back(T(L"asleep"));
+            }
+            for (const auto& p : parts) it.status += (it.status.empty() ? L"" : L", ") + p;
+            if (!it.status.empty()) it.status[0] = towupper(it.status[0]);
+        }
+        if (!offline && !e->st.charging) {
+            it.hoursLeft = battery_history::HoursRemaining(e->st.key);
+            it.hoursLeftText = battery_history::RemainingText(e->st.key);
+            if (it.hoursLeft < 0) {  // not enough for the estimate yet: a rough one, marked as approximate
+                it.hoursLeft = battery_history::RoughHoursRemaining(e->st.key);
+                if (it.hoursLeft >= 0)
+                    it.hoursLeftText = TF(L"{time} (approx.)", { { L"time", battery_history::FormatHours(it.hoursLeft) } });
+            }
+            if (!it.hoursLeftText.empty()) it.info.push_back(std::wstring(T(L"Estimated time to empty")) + L": " + it.hoursLeftText);
+        }
+        if (!e->st.via.empty() && e->st.via != L"demo") it.info.push_back(T(e->st.via));
+        if (g_hoverCard && g_hoverChart && g_recordHistory)
+            for (const auto& pt : battery_history::Recent(e->st.key, 24)) it.trend.push_back({ pt.secondsAgo, pt.percent });
         items.push_back(it);
         if (!tip.empty()) tip += L"\n";
         tip += DisplayName(*e) + L": " + StatusText(*e);
@@ -1240,6 +1269,10 @@ void ShowMenu() {
     }
     AppendMenuW(m, MF_STRING | (g_shortRuntimeAlert ? MF_CHECKED : 0) | (g_recordHistory ? 0 : MF_GRAYED), ID_SHORT_RUNTIME_ALERT,
                 T(L"Warn when a battery won't last the day"));
+    AppendMenuW(m, MF_STRING | (g_hoverCard ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED), ID_HOVER_CARD,
+                T(L"Show a card when the mouse rests on a device"));
+    AppendMenuW(m, MF_STRING | (g_hoverChart ? MF_CHECKED : 0) | (g_wantWidget && g_hoverCard && g_recordHistory ? 0 : MF_GRAYED),
+                ID_HOVER_CHART, T(L"Show the last 24 hours in the card"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     // Display settings (PR #3292): how and where the devices are shown, in one submenu.
     HMENU display = CreatePopupMenu();
@@ -1422,6 +1455,13 @@ void ShowMenu() {
         case ID_RECORD_HISTORY: g_recordHistory = !g_recordHistory; SaveRecordHistory(g_recordHistory); break;
         case ID_LIMIT_OFF: SetChargeLimit(0); break;
         case ID_SHORT_RUNTIME_ALERT: g_shortRuntimeAlert = !g_shortRuntimeAlert; SaveBoolSetting(L"ShortRuntimeAlert", g_shortRuntimeAlert); break;
+        case ID_HOVER_CARD:
+        case ID_HOVER_CHART:
+            if (cmd == ID_HOVER_CARD) { g_hoverCard = !g_hoverCard; SaveBoolSetting(L"HoverCard", g_hoverCard); }
+            else { g_hoverChart = !g_hoverChart; SaveBoolSetting(L"HoverCardChart", g_hoverChart); }
+            widget::SetCardOptions(g_hoverCard, g_hoverChart);
+            UpdateWidget();
+            break;
         case ID_WIDGET_BACKGROUND: SetWidgetBackground(!g_widgetBackground); break;
         case ID_MONITOR_ALL: SetWidgetMonitor(L"all"); break;
         case ID_LANG_AUTO: SetLanguage(L""); break;
@@ -1930,6 +1970,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_recordHistory = LoadRecordHistory();
     g_chargeLimit = LoadChargeLimit();
     g_shortRuntimeAlert = LoadBoolSetting(L"ShortRuntimeAlert", true);
+    g_hoverCard = LoadBoolSetting(L"HoverCard", true);
+    g_hoverChart = LoadBoolSetting(L"HoverCardChart", true);
+    widget::SetCardOptions(g_hoverCard, g_hoverChart);
     g_widgetBackground = LoadWidgetBackground();
     g_brandColors = LoadBrandColors();
     g_stacked = LoadStacked();
