@@ -553,3 +553,15 @@ with its source code.
 | **Marshall** | EMBERTON II speaker (Bluetooth, tested; firmware 14.0.35) | Standard Battery Level (`0x2A19`) read over Bluetooth LE without pairing (Windows cannot pair its LE side). The speaker's current LE address comes from its Google Fast Pair Message Stream, listen only. Read every 2 min; no charging state ([notes](docs/marshall.md)) |
 Also hardware-tested: AJAZZ AJ159 APEX on its 8K dock (`3151:5007`, Rongyuan receiver; name and battery level; charging untested). The level is the value the dock reports, the same one AJAZZ's own web driver reads; on the tested mouse it read 100% although the mouse was not believed to be full, so the dock may round it.
 | **IO by Red Square (experimental)** | Aurora Pro 8K (detected on hardware; reported battery level may differ from vendor software); Ergo Pro 8K (similar receiver HID layout, untested), receiver `3554:FB40`, `FF02:0002` 17-byte reports | Kysona-style read-only battery query, gated by HID layout to avoid BY keyboards; percentage calibration unverified |
+The Linux port can also be built with the modular CMake project (CMake 3.16+ and a C++17 compiler):
+cmake -S . -B build-cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build-cmake
+ctest --test-dir build-cmake --output-on-failure
+DESTDIR=/tmp/stage cmake --install build-cmake --prefix /usr
+`cmake --install` places the binary, desktop launcher, icon and license under the prefix; the udev
+rule is a separate `Udev` component. To create DEB / RPM / TGZ packages (requires `dpkg-deb` and
+`rpmbuild` for the respective generators):
+cpack --config build-cmake/CPackConfig.cmake -B dist
+Version and channel are overridable with `-DWB_VERSION=1.2.3 -DWB_CHANNEL=stable|test|dev`
+(defaults: `1.0.0` / `stable`). GitHub Actions builds, tests and packages the Linux port on every
+push and pull request via `.github/workflows/cmake-linux.yml`.
